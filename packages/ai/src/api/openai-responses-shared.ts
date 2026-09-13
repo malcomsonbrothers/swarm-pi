@@ -572,6 +572,21 @@ export async function processResponsesStream<TApi extends Api>(
 				totalTokens: response.usage.total_tokens || 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
+			// Keep unmodelled numeric usage members (for example codex_rollout_budget_units)
+			// so they survive to the session record instead of being dropped by the rebuild above.
+			const modelledUsageKeys = new Set([
+				"input_tokens",
+				"output_tokens",
+				"total_tokens",
+				"input_tokens_details",
+				"output_tokens_details",
+			]);
+			const providerExtra: Record<string, number> = {};
+			for (const [key, value] of Object.entries(response.usage)) {
+				if (modelledUsageKeys.has(key)) continue;
+				if (typeof value === "number" && Number.isFinite(value)) providerExtra[key] = value;
+			}
+			if (Object.keys(providerExtra).length > 0) output.usage.providerExtra = providerExtra;
 		}
 		calculateCost(model, output.usage);
 		if (options?.applyServiceTierPricing) {

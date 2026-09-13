@@ -414,6 +414,13 @@ export interface Usage {
 		cacheWrite: number;
 		total: number;
 	};
+	/**
+	 * Numeric members of the provider's raw usage object that pi does not model,
+	 * keyed verbatim as the provider sent them. For example, `openai-codex` reports
+	 * `codex_rollout_budget_units`, the weighted cost of a single response, which is
+	 * not part of any modelled usage field.
+	 */
+	providerExtra?: Record<string, number>;
 }
 
 export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred";
