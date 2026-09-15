@@ -89,25 +89,74 @@ describe("OpenAI Codex rate-limit capture", () => {
 		expect(output.usage).toMatchObject({ input: 1821, output: 5, cacheRead: 0, reasoning: 0, totalTokens: 1826 });
 	});
 
-	it("reads numeric x-codex-* response headers under the same keys and skips opaque ones", async () => {
+	it("reads the plan's meter headers under the frame's keys and skips every other x-codex-* header", async () => {
 		const output = await run([completed], {
 			"x-codex-primary-used-percent": "48",
 			"x-codex-primary-reset-at": "1789807127",
 			"x-codex-primary-window-minutes": "10080",
+			"x-codex-primary-reset-after-seconds": "340314",
+			"x-codex-primary-over-secondary-limit-percent": "0",
 			"x-codex-credits-balance": "0",
 			"x-codex-credits-has-credits": "False",
 			"x-codex-active-limit": "premium",
+			"x-codex-plan-type": "pro",
 			"x-codex-turn-state": "123456",
 			"x-codex-bengalfox-primary-used-percent": "0",
+			"x-codex-bengalfox-primary-window-minutes": "300",
 		});
 
 		expect(output.usage.providerExtra).toEqual({
 			codex_primary_used_percent: 48,
 			codex_primary_reset_at: 1789807127,
 			codex_primary_window_minutes: 10080,
+			codex_primary_reset_after_seconds: 340314,
 			codex_credits_balance: 0,
-			codex_bengalfox_primary_used_percent: 0,
 		});
+	});
+
+	it("drops a secondary window the plan does not have, which the headers send as zero minutes", async () => {
+		const output = await run([completed], {
+			"x-codex-primary-used-percent": "48",
+			"x-codex-primary-window-minutes": "10080",
+			"x-codex-secondary-used-percent": "0",
+			"x-codex-secondary-window-minutes": "0",
+			"x-codex-secondary-reset-after-seconds": "0",
+			"x-codex-secondary-reset-at": "",
+		});
+
+		expect(output.usage.providerExtra).toEqual({
+			codex_primary_used_percent: 48,
+			codex_primary_window_minutes: 10080,
+		});
+	});
+
+	it("keeps the server's prompt token counts and timing from the websocket timing frame", async () => {
+		const timing = {
+			type: "responsesapi.websocket_timing",
+			timing_metrics: {
+				timing_scope: "logical_turn",
+				response_id: "resp_rate_limits",
+				websocket_output_text_delta_tbt_ms: null,
+				pre_inference_ms: 243.950116,
+				total_turn_time_s: 2.708816138,
+				num_engine_calls: 1,
+				engine_uncached_prompt_tokens_total: 2255,
+				engine_cached_prompt_tokens_total: 0,
+				engine_total_prompt_tokens_total: 2255,
+			},
+		};
+		const output = await run([rateLimitFrame, timing, completed], {});
+
+		expect(output.usage.providerExtra).toMatchObject({
+			codex_primary_used_percent: 48,
+			codex_engine_uncached_prompt_tokens: 2255,
+			codex_engine_cached_prompt_tokens: 0,
+			codex_engine_total_prompt_tokens: 2255,
+			codex_engine_calls: 1,
+			codex_pre_inference_ms: 243.950116,
+			codex_turn_time_s: 2.708816138,
+		});
+		expect(output.usage.providerExtra).not.toHaveProperty("codex_websocket_output_text_delta_tbt_ms");
 	});
 
 	it("lets the frame refine the headers and keeps unmodelled usage members beside them", async () => {

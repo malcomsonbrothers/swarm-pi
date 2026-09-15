@@ -28,10 +28,17 @@ Three source files change:
   `codex_primary_used_percent`, `codex_primary_window_minutes`,
   `codex_primary_reset_after_seconds`, `codex_primary_reset_at`, the same four for
   `secondary`, and `codex_credits_balance`. The SSE transport sets `x-codex-*` response
-  headers; every numeric one becomes `codex_<rest>` with underscores, so
-  `x-codex-primary-used-percent: 48` lands under the same key as the frame's value.
-  Non-numeric values (`x-codex-active-limit`, the opaque `x-codex-turn-state`) are
-  never copied. The frame is consumed, not passed on.
+  headers; the plan's own primary and secondary window headers and the credit balance
+  become `codex_<rest>` with underscores, so `x-codex-primary-used-percent: 48` lands
+  under the same key as the frame's value. Every other `x-codex-*` header
+  (`-active-limit`, `-plan-type`, the opaque `-turn-state`, the per-feature
+  `-bengalfox-*` family) is never copied, so both transports produce the same keys. A
+  window the plan does not have (null on the frame, zero minutes on the headers) is
+  dropped. The WebSocket transport also sends a `responsesapi.websocket_timing` frame;
+  the server's own prompt token counts for the turn and its timing are kept as
+  `codex_engine_uncached_prompt_tokens`, `codex_engine_cached_prompt_tokens`,
+  `codex_engine_total_prompt_tokens`, `codex_engine_calls`, `codex_pre_inference_ms`
+  and `codex_turn_time_s`. Both frames are consumed, not passed on.
 
 No existing field, behaviour or file is altered.
 
