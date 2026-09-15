@@ -562,6 +562,9 @@ export async function processResponsesStream<TApi extends Api>(
 				| undefined;
 			const cachedTokens = inputDetails?.cached_tokens || 0;
 			const cacheWriteTokens = inputDetails?.cache_write_tokens || 0;
+			// Members a transport stashed before the terminal event (the Codex rate-limit
+			// reading) must survive the rebuild below.
+			const priorExtra = output.usage.providerExtra;
 			output.usage = {
 				// OpenAI includes cached and cache-write tokens in input_tokens, so subtract both.
 				input: Math.max(0, (response.usage.input_tokens || 0) - cachedTokens - cacheWriteTokens),
@@ -581,7 +584,7 @@ export async function processResponsesStream<TApi extends Api>(
 				"input_tokens_details",
 				"output_tokens_details",
 			]);
-			const providerExtra: Record<string, number> = {};
+			const providerExtra: Record<string, number> = { ...priorExtra };
 			for (const [key, value] of Object.entries(response.usage)) {
 				if (modelledUsageKeys.has(key)) continue;
 				if (typeof value === "number" && Number.isFinite(value)) providerExtra[key] = value;
