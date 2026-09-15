@@ -665,6 +665,8 @@ async function processStream(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	resetProviderExtra(output);
+	mergeProviderExtra(output, codexRateLimitHeaderExtras(response.headers));
 	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal), output), output, stream, model, {
 		serviceTier: options?.serviceTier,
 		grammarToolInputProperties,
@@ -730,6 +732,11 @@ async function* mapCodexEvents(
 		const type = typeof event.type === "string" ? event.type : undefined;
 		if (!type) continue;
 
+		if (type === "codex.rate_limits") {
+			mergeProviderExtra(output, codexRateLimitFrameExtras(event));
+			continue;
+		}
+
 		if (type === "error") {
 			const { code, message } = extractCodexEventError(event);
 			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
@@ -764,6 +771,75 @@ async function* mapCodexEvents(
 function normalizeCodexStatus(status: unknown): CodexResponseStatus | undefined {
 	if (typeof status !== "string") return undefined;
 	return CODEX_RESPONSE_STATUSES.has(status as CodexResponseStatus) ? (status as CodexResponseStatus) : undefined;
+}
+
+// ============================================================================
+// Rate-limit capture
+// ============================================================================
+// The Codex backend reports the subscription meter on every turn. The WebSocket
+// transport sends one `codex.rate_limits` frame before the response events; the
+// SSE transport sets `x-codex-*` response headers. Both are flattened into
+// numeric `usage.providerExtra` members under one naming rule, so the session
+// record carries the meter reading beside the turn that produced it:
+// `x-codex-primary-used-percent: 48` and `rate_limits.primary.used_percent: 48`
+// both become `codex_primary_used_percent: 48`.
+
+function finiteNumber(value: unknown): number | undefined {
+	if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+	if (typeof value !== "string" || value.trim() === "") return undefined;
+	const parsed = Number(value);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function mergeProviderExtra(output: AssistantMessage, extras: Record<string, number>): void {
+	if (Object.keys(extras).length === 0) return;
+	output.usage.providerExtra = { ...output.usage.providerExtra, ...extras };
+}
+
+/** A retried or fallen-back attempt starts with no reading from the attempt before it. */
+function resetProviderExtra(output: AssistantMessage): void {
+	output.usage.providerExtra = undefined;
+}
+
+/** The meter fields a `x-codex-*` header may carry. Anything else (`-turn-state`, `-active-limit`) is opaque. */
+const CODEX_METER_HEADER_SUFFIXES = [
+	"-used-percent",
+	"-reset-at",
+	"-reset-after-seconds",
+	"-window-minutes",
+	"-over-secondary-limit-percent",
+	"-credits-balance",
+];
+
+/** Every numeric meter `x-codex-*` response header, keyed as `codex_<rest>` with underscores. */
+function codexRateLimitHeaderExtras(headers: Headers): Record<string, number> {
+	const extras: Record<string, number> = {};
+	for (const [name, value] of headers.entries()) {
+		if (!name.startsWith("x-codex-")) continue;
+		if (!CODEX_METER_HEADER_SUFFIXES.some((suffix) => name.endsWith(suffix))) continue;
+		const parsed = finiteNumber(value);
+		if (parsed === undefined) continue;
+		extras[name.slice(2).replaceAll("-", "_")] = parsed;
+	}
+	return extras;
+}
+
+/** The `codex.rate_limits` frame's primary and secondary windows and credit balance, under the header keys. */
+function codexRateLimitFrameExtras(frame: Record<string, unknown>): Record<string, number> {
+	const extras: Record<string, number> = {};
+	const limits = frame.rate_limits as Record<string, unknown> | undefined;
+	for (const window of ["primary", "secondary"] as const) {
+		const snapshot = limits?.[window];
+		if (!snapshot || typeof snapshot !== "object") continue;
+		for (const [key, value] of Object.entries(snapshot as Record<string, unknown>)) {
+			const parsed = finiteNumber(value);
+			if (parsed !== undefined) extras[`codex_${window}_${key}`] = parsed;
+		}
+	}
+	const credits = frame.credits as Record<string, unknown> | undefined;
+	const balance = finiteNumber(credits?.balance);
+	if (balance !== undefined) extras.codex_credits_balance = balance;
+	return extras;
 }
 
 // ============================================================================
@@ -1479,6 +1555,8 @@ async function processWebSocketStream(
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
+	// Each attempt observes its own meter reading; a failed attempt's must not survive into the retry.
+	resetProviderExtra(output);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
