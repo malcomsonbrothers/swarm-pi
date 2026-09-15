@@ -406,6 +406,12 @@ export interface Usage {
 	 * keyed verbatim as the provider sent them. For example, `openai-codex` reports
 	 * `codex_rollout_budget_units`, the weighted cost of a single response, which is
 	 * not part of any modelled usage field.
+	 *
+	 * The `openai-codex` transport also adds the subscription meter reading the
+	 * backend returns with every turn, flattened as `codex_primary_used_percent`,
+	 * `codex_primary_reset_at`, `codex_primary_window_minutes`,
+	 * `codex_primary_reset_after_seconds`, the same four for `secondary` when the
+	 * plan has one, and `codex_credits_balance`.
 	 */
 	providerExtra?: Record<string, number>;
 }
