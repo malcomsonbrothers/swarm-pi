@@ -729,6 +729,11 @@ async function* mapCodexEvents(
 			continue;
 		}
 
+		if (type === "responsesapi.websocket_timing") {
+			mergeProviderExtra(output, codexTimingFrameExtras(event));
+			continue;
+		}
+
 		if (type === "error") {
 			const { code, message } = extractCodexEventError(event);
 			throw new CodexApiError(`Codex error: ${message || code || JSON.stringify(event)}`, {
@@ -793,27 +798,35 @@ function resetProviderExtra(output: AssistantMessage): void {
 	output.usage.providerExtra = undefined;
 }
 
-/** The meter fields a `x-codex-*` header may carry. Anything else (`-turn-state`, `-active-limit`) is opaque. */
-const CODEX_METER_HEADER_SUFFIXES = [
-	"-used-percent",
-	"-reset-at",
-	"-reset-after-seconds",
-	"-window-minutes",
-	"-over-secondary-limit-percent",
-	"-credits-balance",
-];
+/**
+ * The meter headers that are read: the plan's own primary and secondary windows and the
+ * credit balance, the same members the WebSocket frame carries. Other `x-codex-*` headers
+ * (`-active-limit`, `-plan-type`, the opaque `-turn-state`, the per-feature `-bengalfox-*`
+ * family) are never copied, so both transports produce the same keys.
+ */
+const CODEX_METER_HEADER =
+	/^x-codex-(primary|secondary)-(used-percent|window-minutes|reset-after-seconds|reset-at)$|^x-codex-credits-balance$/;
+
+/** A window the plan does not have arrives as null on the frame and as zero minutes on the headers. */
+function dropEmptyWindows(extras: Record<string, number>): Record<string, number> {
+	for (const [key, value] of Object.entries(extras)) {
+		if (!key.endsWith("_window_minutes") || value !== 0) continue;
+		const prefix = `${key.slice(0, -"_window_minutes".length)}_`;
+		for (const other of Object.keys(extras)) if (other.startsWith(prefix)) delete extras[other];
+	}
+	return extras;
+}
 
 /** Every numeric meter `x-codex-*` response header, keyed as `codex_<rest>` with underscores. */
 function codexRateLimitHeaderExtras(headers: Headers): Record<string, number> {
 	const extras: Record<string, number> = {};
 	for (const [name, value] of headers.entries()) {
-		if (!name.startsWith("x-codex-")) continue;
-		if (!CODEX_METER_HEADER_SUFFIXES.some((suffix) => name.endsWith(suffix))) continue;
+		if (!CODEX_METER_HEADER.test(name)) continue;
 		const parsed = finiteNumber(value);
 		if (parsed === undefined) continue;
 		extras[name.slice(2).replaceAll("-", "_")] = parsed;
 	}
-	return extras;
+	return dropEmptyWindows(extras);
 }
 
 /** The `codex.rate_limits` frame's primary and secondary windows and credit balance, under the header keys. */
@@ -831,6 +844,31 @@ function codexRateLimitFrameExtras(frame: Record<string, unknown>): Record<strin
 	const credits = frame.credits as Record<string, unknown> | undefined;
 	const balance = finiteNumber(credits?.balance);
 	if (balance !== undefined) extras.codex_credits_balance = balance;
+	return dropEmptyWindows(extras);
+}
+
+/**
+ * The WebSocket transport's `responsesapi.websocket_timing` frame carries the server's own
+ * count of cached and uncached prompt tokens for the turn and its timing. These members are
+ * kept under short keys; the rest of the frame (batch sizes, per-delta timings) is not.
+ */
+const CODEX_TIMING_KEYS: Record<string, string> = {
+	engine_uncached_prompt_tokens_total: "codex_engine_uncached_prompt_tokens",
+	engine_cached_prompt_tokens_total: "codex_engine_cached_prompt_tokens",
+	engine_total_prompt_tokens_total: "codex_engine_total_prompt_tokens",
+	num_engine_calls: "codex_engine_calls",
+	pre_inference_ms: "codex_pre_inference_ms",
+	total_turn_time_s: "codex_turn_time_s",
+};
+
+function codexTimingFrameExtras(frame: Record<string, unknown>): Record<string, number> {
+	const extras: Record<string, number> = {};
+	const metrics = frame.timing_metrics as Record<string, unknown> | undefined;
+	if (!metrics || typeof metrics !== "object") return extras;
+	for (const [key, target] of Object.entries(CODEX_TIMING_KEYS)) {
+		const parsed = finiteNumber(metrics[key]);
+		if (parsed !== undefined) extras[target] = parsed;
+	}
 	return extras;
 }
 

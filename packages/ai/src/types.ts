@@ -411,7 +411,9 @@ export interface Usage {
 	 * backend returns with every turn, flattened as `codex_primary_used_percent`,
 	 * `codex_primary_reset_at`, `codex_primary_window_minutes`,
 	 * `codex_primary_reset_after_seconds`, the same four for `secondary` when the
-	 * plan has one, and `codex_credits_balance`.
+	 * plan has one, and `codex_credits_balance`. On the WebSocket transport it also
+	 * adds the server's prompt token counts and timing for the turn
+	 * (`codex_engine_cached_prompt_tokens`, `codex_turn_time_s` and siblings).
 	 */
 	providerExtra?: Record<string, number>;
 }
