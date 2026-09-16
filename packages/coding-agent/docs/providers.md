@@ -31,6 +31,23 @@ Use `/logout` to clear credentials. Tokens are stored in `~/.pi/agent/auth.json`
 - Requires ChatGPT Plus or Pro subscription
 - Officially endorsed by OpenAI: [Codex for OSS](https://developers.openai.com/community/codex-for-oss)
 
+#### Using a Codex proxy
+
+Configure a Codex-compatible proxy in `models.json`:
+
+```json
+{
+  "providers": {
+    "openai-codex": {
+      "baseUrl": "http://100.71.208.26:8317/v1/responses",
+      "apiKey": "$CODEX_PROXY_KEY"
+    }
+  }
+}
+```
+
+With a plain proxy key, no `/login openai-codex` is needed.
+
 ### Claude Pro/Max
 
 Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
