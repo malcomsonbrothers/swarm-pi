@@ -46,7 +46,7 @@ Configure a Codex-compatible proxy in `models.json`:
 }
 ```
 
-With a plain proxy key, no `/login openai-codex` is needed.
+With a plain proxy key, no `/login openai-codex` is needed. Through a proxy, the client streams over SSE so the meter headers arrive.
 
 ### Claude Pro/Max
 
