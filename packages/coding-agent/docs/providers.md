@@ -19,6 +19,23 @@ Run `/logout` and select a provider to remove its stored credential. This does n
 
 Radius authentication uses its gateway catalog and caches refreshed model metadata for later offline startup. A custom Radius gateway configured in `models.json` uses its own catalog rather than inheriting the public `radius.pi.dev` catalog.
 
+#### Using a Codex proxy
+
+Configure a Codex-compatible proxy in `models.json`:
+
+```json
+{
+  "providers": {
+    "openai-codex": {
+      "baseUrl": "http://100.71.208.26:8317/v1/responses",
+      "apiKey": "$CODEX_PROXY_KEY"
+    }
+  }
+}
+```
+
+With a plain proxy key, no `/login openai-codex` is needed.
+
 ## Use an API key from the environment
 
 Environment variables are useful in CI and anywhere Pi should not store the key. Set the variable before starting Pi:
