@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	buildBaseCodexHeaders,
 	extractAccountId,
+	resolveCodexTransport,
 	resolveCodexUrl,
 	resolveCodexWebSocketUrl,
 } from "../src/api/openai-codex-responses.ts";
@@ -25,6 +26,13 @@ describe("OpenAI Codex proxy support", () => {
 		);
 		expect(resolveCodexUrl("http://proxy.example/v1/responses")).toBe("http://proxy.example/v1/responses");
 		expect(resolveCodexWebSocketUrl("http://proxy.example/v1/responses")).toBe("ws://proxy.example/v1/responses");
+	});
+
+	it("uses SSE automatically for proxy bases while preserving explicit transports", () => {
+		expect(resolveCodexTransport("auto")).toBe("auto");
+		expect(resolveCodexTransport("auto", "http://proxy.example/v1/responses")).toBe("sse");
+		expect(resolveCodexTransport("websocket", "http://proxy.example/v1/responses")).toBe("websocket");
+		expect(resolveCodexTransport("sse", "http://proxy.example/v1/responses")).toBe("sse");
 	});
 
 	it("extracts an account ID only when the JWT contains one", () => {

@@ -291,7 +291,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			const bodyJson = JSON.stringify(body);
 			const httpTimeoutMs = normalizeTimeoutMs(options?.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options?.websocketConnectTimeoutMs);
-			const transport = options?.transport || "auto";
+			const transport = resolveCodexTransport(options?.transport, model.baseUrl);
 			let startEmitted = false;
 			const websocketDisabledForSession = transport !== "sse" && isWebSocketSseFallbackActive(cacheSessionId);
 			if (websocketDisabledForSession) {
@@ -651,6 +651,17 @@ export function resolveCodexWebSocketUrl(baseUrl?: string): string {
 	if (url.protocol === "https:") url.protocol = "wss:";
 	if (url.protocol === "http:") url.protocol = "ws:";
 	return url.toString();
+}
+
+export function resolveCodexTransport(
+	requested: OpenAICodexResponsesOptions["transport"] | undefined,
+	baseUrl?: string,
+): NonNullable<OpenAICodexResponsesOptions["transport"]> {
+	const transport = requested ?? "auto";
+	if (transport === "auto" && resolveCodexUrl(baseUrl) !== resolveCodexUrl(DEFAULT_CODEX_BASE_URL)) {
+		return "sse";
+	}
+	return transport;
 }
 
 // ============================================================================
