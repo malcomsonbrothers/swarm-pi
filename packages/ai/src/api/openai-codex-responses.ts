@@ -630,15 +630,15 @@ function resolveCodexServiceTier(
 	return responseServiceTier ?? requestServiceTier;
 }
 
-function resolveCodexUrl(baseUrl?: string): string {
+export function resolveCodexUrl(baseUrl?: string): string {
 	const raw = baseUrl && baseUrl.trim().length > 0 ? baseUrl : DEFAULT_CODEX_BASE_URL;
 	const normalized = raw.replace(/\/+$/, "");
-	if (normalized.endsWith("/codex/responses")) return normalized;
+	if (normalized.endsWith("/responses")) return normalized;
 	if (normalized.endsWith("/codex")) return `${normalized}/responses`;
 	return `${normalized}/codex/responses`;
 }
 
-function resolveCodexWebSocketUrl(baseUrl?: string): string {
+export function resolveCodexWebSocketUrl(baseUrl?: string): string {
 	const url = new URL(resolveCodexUrl(baseUrl));
 	if (url.protocol === "https:") url.protocol = "wss:";
 	if (url.protocol === "http:") url.protocol = "ws:";
@@ -1234,7 +1234,7 @@ async function acquireWebSocket(
 	url: string,
 	headers: Headers,
 	sessionId: string | undefined,
-	accountId: string,
+	accountId: string | null,
 	signal?: AbortSignal,
 	connectTimeoutMs?: number,
 	env?: ProviderEnv,
@@ -1244,7 +1244,7 @@ async function acquireWebSocket(
 	reused: boolean;
 	release: (options?: { keep?: boolean }) => void;
 }> {
-	if (!sessionId) {
+	if (!sessionId || !accountId) {
 		const socket = await connectWebSocket(url, headers, signal, connectTimeoutMs, env);
 		return {
 			socket,
@@ -1581,7 +1581,7 @@ async function processWebSocketStream(
 	idleTimeoutMs: number | undefined,
 	websocketConnectTimeoutMs: number | undefined,
 	cacheSessionId: string | undefined,
-	accountId: string,
+	accountId: string | null,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
 ): Promise<void> {
@@ -1696,23 +1696,22 @@ async function parseErrorResponse(response: Response): Promise<{ message: string
 // Auth & Headers
 // ============================================================================
 
-function extractAccountId(token: string): string {
+export function extractAccountId(token: string): string | null {
 	try {
 		const parts = token.split(".");
-		if (parts.length !== 3) throw new Error("Invalid token");
+		if (parts.length !== 3) return null;
 		const payload = JSON.parse(atob(parts[1]));
 		const accountId = payload?.[JWT_CLAIM_PATH]?.chatgpt_account_id;
-		if (!accountId) throw new Error("No account ID in token");
-		return accountId;
+		return typeof accountId === "string" && accountId.length > 0 ? accountId : null;
 	} catch {
-		throw new Error("Failed to extract accountId from token");
+		return null;
 	}
 }
 
-function buildBaseCodexHeaders(
+export function buildBaseCodexHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: ProviderHeaders | undefined,
-	accountId: string,
+	accountId: string | null,
 	token: string,
 ): Headers {
 	const headers = new Headers(initHeaders);
@@ -1724,7 +1723,11 @@ function buildBaseCodexHeaders(
 		}
 	}
 	headers.set("Authorization", `Bearer ${token}`);
-	headers.set("chatgpt-account-id", accountId);
+	if (accountId) {
+		headers.set("chatgpt-account-id", accountId);
+	} else {
+		headers.delete("chatgpt-account-id");
+	}
 	headers.set("originator", "pi");
 	headers.set("User-Agent", getPiUserAgent());
 	return headers;
@@ -1733,7 +1736,7 @@ function buildBaseCodexHeaders(
 function buildSSEHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: ProviderHeaders | undefined,
-	accountId: string,
+	accountId: string | null,
 	token: string,
 	sessionId?: string,
 ): Headers {
@@ -1753,7 +1756,7 @@ function buildSSEHeaders(
 function buildWebSocketHeaders(
 	initHeaders: Record<string, string> | undefined,
 	additionalHeaders: ProviderHeaders | undefined,
-	accountId: string,
+	accountId: string | null,
 	token: string,
 	requestId: string,
 ): Headers {
