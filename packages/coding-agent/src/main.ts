@@ -617,7 +617,9 @@ export async function main(args: string[], options?: MainOptions) {
 	time("parseArgs");
 
 	if (parsed.version) {
-		console.log(VERSION);
+		// The "+swarm" build marker lets the swarm daemon's preflight tell this
+		// fork from an upstream pi of the same version.
+		console.log(`${VERSION}+swarm`);
 		process.exit(0);
 	}
 
