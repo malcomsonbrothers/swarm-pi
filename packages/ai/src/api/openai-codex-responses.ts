@@ -51,7 +51,11 @@ import { buildBaseOptions } from "./simple-options.ts";
 
 const DEFAULT_CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const JWT_CLAIM_PATH = "https://api.openai.com/auth" as const;
-const DEFAULT_MAX_RETRIES = 0;
+// Codex answers a burst with HTTP 429 and a Retry-After of a few seconds, so one
+// 429 must not end the turn: four retries cover the usual cooldown, and a genuine
+// usage limit is terminal and never retried (see isTerminalRateLimitError).
+const DEFAULT_MAX_RETRIES = 4;
+const RETRY_JITTER_FRACTION = 0.2;
 const BASE_DELAY_MS = 1000;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
 const DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS = 15_000;
@@ -120,8 +124,9 @@ function assertSuccessfulOutput(output: AssistantMessage): asserts output is Suc
 // Retry Helpers
 // ============================================================================
 
+/** A spent subscription, not throttling: retrying it only wastes the operator's time. */
 function isTerminalRateLimitError(errorText: string): boolean {
-	return /GoUsageLimitError|FreeUsageLimitError|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
+	return /GoUsageLimitError|FreeUsageLimitError|usage_limit_reached|usage_not_included|Monthly usage limit reached|available balance|insufficient_quota|out of budget|quota exceeded|billing/i.test(
 		errorText,
 	);
 }
@@ -187,6 +192,27 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 			reject(new Error("Request was aborted"));
 		});
 	});
+}
+
+/**
+ * Backoff for attempt 0, 1, 2 ... when the response carries no Retry-After:
+ * BASE_DELAY_MS doubled per attempt, plus jitter of up to 20 percent on top, so
+ * parallel workers that were throttled together do not come back in lockstep.
+ */
+function backoffDelayMs(attempt: number): number {
+	const base = BASE_DELAY_MS * 2 ** attempt;
+	return Math.round(base * (1 + Math.random() * RETRY_JITTER_FRACTION));
+}
+
+/** An HTTP error already parsed into its final message; the network retry path must not retry it again. */
+class CodexHttpError extends Error {}
+
+/** What the retry loop spent, for the session usage: absent when the first attempt succeeded. */
+function retryProviderExtra(attempts: number, retryAfterSeconds: number | undefined): Record<string, number> {
+	if (attempts === 0) return {};
+	const extras: Record<string, number> = { codex_retry_attempts: attempts };
+	if (retryAfterSeconds !== undefined) extras.codex_retry_after_seconds = retryAfterSeconds;
+	return extras;
 }
 
 function normalizeTimeoutMs(value: number | undefined): number | undefined {
@@ -386,6 +412,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			let response: Response | undefined;
 			let lastError: Error | undefined;
 			const maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+			let retryAttempts = 0;
+			let lastRetryAfterSeconds: number | undefined;
 
 			for (let attempt = 0; attempt <= maxRetries; attempt++) {
 				if (options?.signal?.aborted) {
@@ -425,9 +453,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						const retryAfterDelayMs = getRetryAfterDelayMs(response.headers);
 						const delayMs =
 							retryAfterDelayMs === undefined
-								? BASE_DELAY_MS * 2 ** attempt
+								? backoffDelayMs(attempt)
 								: validateRetryDelayMs(retryAfterDelayMs, options);
 
+						retryAttempts++;
+						lastRetryAfterSeconds = retryAfterDelayMs === undefined ? undefined : retryAfterDelayMs / 1000;
 						await sleep(delayMs, options?.signal);
 						continue;
 					}
@@ -437,8 +467,8 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						status: response.status,
 						statusText: response.statusText,
 					});
-					const info = await parseErrorResponse(fakeResponse);
-					throw new Error(info.friendlyMessage || info.message);
+					const info = await parseErrorResponse(fakeResponse, retryAttempts);
+					throw new CodexHttpError(info.friendlyMessage || info.message);
 				} catch (error) {
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
@@ -450,10 +480,11 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					if (
 						attempt < maxRetries &&
 						!(lastError instanceof RetryDelayExceededError) &&
+						!(lastError instanceof CodexHttpError) &&
 						!lastError.message.includes("usage limit")
 					) {
-						const delayMs = BASE_DELAY_MS * 2 ** attempt;
-						await sleep(delayMs, options?.signal);
+						retryAttempts++;
+						await sleep(backoffDelayMs(attempt), options?.signal);
 						continue;
 					}
 					throw lastError;
@@ -473,6 +504,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				stream.push({ type: "start", partial: output });
 			}
 			await processStream(response, output, stream, model, grammarToolInputProperties, options);
+			// processStream resets providerExtra for the attempt that answered, so the
+			// retry count is merged after it, not before.
+			mergeProviderExtra(output, retryProviderExtra(retryAttempts, lastRetryAfterSeconds));
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -1689,33 +1723,43 @@ async function processWebSocketStream(
 // Error Handling
 // ============================================================================
 
-async function parseErrorResponse(response: Response): Promise<{ message: string; friendlyMessage?: string }> {
+/**
+ * The operator must be able to tell throttling from an exhausted subscription, so the
+ * usage-limit wording is reserved for the codes that really mean the plan is spent
+ * (`usage_limit_reached`, `usage_not_included`). Every other 429, including a bare
+ * `rate_limit_exceeded` or a proxy cooldown with no code at all, reports the upstream
+ * message and how many retries were already spent on it.
+ */
+async function parseErrorResponse(
+	response: Response,
+	retryAttempts = 0,
+): Promise<{ message: string; friendlyMessage?: string }> {
 	const raw = await response.text();
 	let message = raw || response.statusText || "Request failed";
 	let friendlyMessage: string | undefined;
 
 	try {
 		const parsed = JSON.parse(raw) as {
+			detail?: unknown;
 			error?: { code?: string; type?: string; message?: string; plan_type?: string; resets_at?: number };
 		};
 		const err = parsed?.error;
-		if (err) {
-			const code = err.code || err.type || "";
-			if (/usage_limit_reached|usage_not_included|rate_limit_exceeded/i.test(code) || response.status === 429) {
-				const plan = err.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
-				const mins = err.resets_at
-					? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000))
-					: undefined;
-				const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
-				friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
-			}
-			message = err.message || friendlyMessage || message;
+		const detail = typeof parsed?.detail === "string" ? parsed.detail : undefined;
+		const upstream = err?.message || detail;
+		const code = err?.code || err?.type || "";
+		if (/usage_limit_reached|usage_not_included/i.test(code)) {
+			const plan = err?.plan_type ? ` (${err.plan_type.toLowerCase()} plan)` : "";
+			const mins = err?.resets_at ? Math.max(0, Math.round((err.resets_at * 1000 - Date.now()) / 60000)) : undefined;
+			const when = mins !== undefined ? ` Try again in ~${mins} min.` : "";
+			friendlyMessage = `You have hit your ChatGPT usage limit${plan}.${when}`.trim();
+		} else if (response.status === 429 || /rate_limit_exceeded/i.test(code)) {
+			friendlyMessage = `Codex rate limit: ${upstream || message}; retried ${retryAttempts} times`;
 		}
+		message = upstream || friendlyMessage || message;
 	} catch {}
 
 	return { message, friendlyMessage };
 }
-
 // ============================================================================
 // Auth & Headers
 // ============================================================================
