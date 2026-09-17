@@ -410,6 +410,9 @@ describe("openai-codex streaming", () => {
 			apiKey: token,
 			transport: "sse",
 			timeoutMs: 10,
+			// The timeout itself is under test here, not the retry loop the transport
+			// now runs by default, so this asks for the single attempt.
+			maxRetries: 0,
 		}).result();
 
 		expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -2627,10 +2630,13 @@ describe("openai-codex streaming", () => {
 			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
 		};
 
+		// Each wait is the base delay plus jitter of up to 20 percent, so the raw delays
+		// are folded back onto the base they came from before they are compared.
 		const retryTimeoutDelays = () =>
 			setTimeoutSpy.mock.calls
 				.map((call) => call[1])
-				.filter((delay): delay is number => delay === 1000 || delay === 2000 || delay === 4000);
+				.filter((delay): delay is number => typeof delay === "number" && delay >= 1000 && delay <= 4800)
+				.map((delay) => 1000 * 2 ** Math.floor(Math.log2(delay / 1000)));
 
 		const resultPromise = streamOpenAICodexResponses(model, context, {
 			apiKey: token,
