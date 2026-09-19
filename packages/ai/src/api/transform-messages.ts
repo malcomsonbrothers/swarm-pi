@@ -1,6 +1,6 @@
-import { existsSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import type * as NodeFs from "node:fs";
+import type * as NodeOs from "node:os";
+import type * as NodePath from "node:path";
 import type {
 	Api,
 	AssistantMessage,
@@ -66,6 +66,24 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
  */
 const CODEX_RESPONSES_API = "openai-codex-responses";
 
+type ProcessWithBuiltinModule = typeof process & {
+	getBuiltinModule?: {
+		(id: "node:fs"): typeof NodeFs;
+		(id: "node:os"): typeof NodeOs;
+		(id: "node:path"): typeof NodePath;
+	};
+};
+
+function codexCrossModelSwitchIsEnabled(): boolean {
+	if (typeof process === "undefined" || !(process.versions?.node || process.versions?.bun)) return true;
+	const nodeProcess = process as ProcessWithBuiltinModule;
+	const fs = nodeProcess.getBuiltinModule?.("node:fs");
+	const os = nodeProcess.getBuiltinModule?.("node:os");
+	const path = nodeProcess.getBuiltinModule?.("node:path");
+	if (!fs || !os || !path) return true;
+	return !fs.existsSync(path.join(os.homedir(), ".pi", "agent", "codex-cross-model-off"));
+}
+
 /**
  * True when an assistant message written by one Codex model is replayed to a
  * different Codex model, whatever the provider is called (the vendor's own or a
@@ -75,7 +93,7 @@ const CODEX_RESPONSES_API = "openai-codex-responses";
 export function keepsCodexReasoning(source: Pick<AssistantMessage, "api" | "model">, model: Model<Api>): boolean {
 	if (source.api !== CODEX_RESPONSES_API || model.api !== CODEX_RESPONSES_API) return false;
 	if (source.model === model.id) return false;
-	return !existsSync(join(homedir(), ".pi", "agent", "codex-cross-model-off"));
+	return codexCrossModelSwitchIsEnabled();
 }
 
 export function transformMessages<TApi extends Api>(

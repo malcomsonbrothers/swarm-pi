@@ -1,10 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { streamSimple as streamOpenAICodexResponses } from "../src/api/openai-codex-responses.ts";
-import type { Context, FetchFunction, Model } from "../src/types.ts";
+import type { FetchFunction, Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
-const context: Context = {
+const context = normalizeContext({
 	messages: [{ role: "user", content: "hello", timestamp: 1 }],
-};
+});
 
 const apiKey = `header.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account" } }))}.signature`;
 
