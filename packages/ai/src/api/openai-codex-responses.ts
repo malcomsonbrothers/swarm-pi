@@ -351,6 +351,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						if (options?.signal?.aborted) {
 							throw new Error("Request was aborted");
 						}
+						// processWebSocketStream resets providerExtra for the attempt that
+						// answered, so the requested tier is merged after it, not before.
+						mergeProviderExtra(output, requestedServiceTierProviderExtra(body.service_tier));
 						assertSuccessfulOutput(output);
 						stream.push({
 							type: "done",
@@ -502,6 +505,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 			// processStream resets providerExtra for the attempt that answered, so the
 			// retry count is merged after it, not before.
 			mergeProviderExtra(output, retryProviderExtra(retryAttempts, lastRetryAfterSeconds));
+			mergeProviderExtra(output, requestedServiceTierProviderExtra(body.service_tier));
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -630,17 +634,76 @@ function buildRequestBody(
 }
 
 /**
- * The owner's switch for the Codex service tier: the one word in
- * ~/.pi/agent/codex-service-tier ("priority" or "flex"). No file, no tier.
- * Read per request so the switch takes effect without a restart.
+ * The exact sentence ~/.pi/agent/codex-service-tier must hold to turn the
+ * priority tier on. A deliberate sentence, not a word, so nobody switches the
+ * fast tier on without reading what it costs.
  */
-function codexServiceTierFromFlagFile(): ResponseCreateParamsStreaming["service_tier"] | undefined {
+export const CODEX_PRIORITY_TIER_CONSENT =
+	"I accept that the priority tier uses the subscription more than twice as fast";
+
+/** Environment variable naming a switch file that replaces the one under the home directory. */
+export const CODEX_SERVICE_TIER_FILE_ENV = "PI_CODEX_SERVICE_TIER_FILE";
+
+/** Warning written to stderr the first time the priority tier is applied in a process. */
+export function codexPriorityTierWarning(flagFilePath: string): string {
+	return `Codex fast tier is ON (priority): the subscription is used more than twice as fast. Remove ${flagFilePath} to turn it off.`;
+}
+
+let codexPriorityTierWarned = false;
+
+/** Clear the once-per-process warning latch. For tests only. */
+export function resetCodexPriorityTierWarning(): void {
+	codexPriorityTierWarned = false;
+}
+
+export interface CodexServiceTierFlagFileOptions {
+	/** Home directory holding .pi/agent/codex-service-tier. Defaults to the real home. */
+	homeDir?: string;
+	/** Environment consulted for PI_CODEX_SERVICE_TIER_FILE. Defaults to the process environment. */
+	env?: Record<string, string | undefined>;
+	/** Sink for the priority warning. Defaults to one line on stderr. */
+	warn?: (message: string) => void;
+}
+
+/**
+ * Which file is the switch for this process: the one named by
+ * PI_CODEX_SERVICE_TIER_FILE when that is set to a non-empty path, otherwise
+ * ~/.pi/agent/codex-service-tier. A per-run file lets one swarm run turn the
+ * fast tier on and off without touching any other run.
+ */
+export function codexServiceTierFlagFilePath(options?: CodexServiceTierFlagFileOptions): string {
+	const override = (options?.env ?? process.env)[CODEX_SERVICE_TIER_FILE_ENV];
+	if (override !== undefined && override.trim() !== "") return override;
+	return join(options?.homeDir ?? homedir(), ".pi", "agent", "codex-service-tier");
+}
+
+/**
+ * The owner's switch for the Codex service tier: the file above holding either
+ * the consent sentence (priority) or the word "flex". Anything else, and any
+ * missing or unreadable file, means no tier. Read per request so the switch
+ * takes effect without a restart, and mid-session.
+ */
+export function codexServiceTierFromFlagFile(
+	options?: CodexServiceTierFlagFileOptions,
+): ResponseCreateParamsStreaming["service_tier"] | undefined {
+	const flagFilePath = codexServiceTierFlagFilePath(options);
+	let contents: string;
 	try {
-		const word = readFileSync(join(homedir(), ".pi", "agent", "codex-service-tier"), "utf8").trim();
-		return word === "priority" || word === "flex" ? word : undefined;
+		contents = readFileSync(flagFilePath, "utf8");
 	} catch {
 		return undefined;
 	}
+
+	const text = contents.trim();
+	if (text === "flex") return "flex";
+	if (text !== CODEX_PRIORITY_TIER_CONSENT) return undefined;
+
+	if (!codexPriorityTierWarned) {
+		codexPriorityTierWarned = true;
+		const warn = options?.warn ?? ((message: string) => void process.stderr.write(`${message}\n`));
+		warn(codexPriorityTierWarning(flagFilePath));
+	}
+	return "priority";
 }
 
 function getServiceTierCostMultiplier(
@@ -851,7 +914,20 @@ function finiteNumber(value: unknown): number | undefined {
 	return Number.isFinite(parsed) ? parsed : undefined;
 }
 
-function mergeProviderExtra(output: AssistantMessage, extras: Record<string, number>): void {
+/**
+ * The tier this turn asked for, recorded verbatim beside the other provider
+ * extras. Only the request is recorded: the response's own `service_tier` is
+ * the backend's account of what it did and is not evidence of what pi asked
+ * for, so it never becomes this value.
+ */
+function requestedServiceTierProviderExtra(
+	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
+): Record<string, string> {
+	if (requestServiceTier !== "priority" && requestServiceTier !== "flex") return {};
+	return { codex_service_tier_requested: requestServiceTier };
+}
+
+function mergeProviderExtra(output: AssistantMessage, extras: Record<string, number | string>): void {
 	if (Object.keys(extras).length === 0) return;
 	output.usage.providerExtra = { ...output.usage.providerExtra, ...extras };
 }

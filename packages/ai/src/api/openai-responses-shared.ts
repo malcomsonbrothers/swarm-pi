@@ -614,7 +614,9 @@ export async function processResponsesStream<TApi extends Api>(
 				"input_tokens_details",
 				"output_tokens_details",
 			]);
-			const providerExtra: Record<string, number> = { ...priorExtra };
+			// Only numbers are read from the provider's usage object; a string member
+			// can only come from what pi itself stashed (the requested service tier).
+			const providerExtra: Record<string, number | string> = { ...priorExtra };
 			for (const [key, value] of Object.entries(response.usage)) {
 				if (modelledUsageKeys.has(key)) continue;
 				if (typeof value === "number" && Number.isFinite(value)) providerExtra[key] = value;

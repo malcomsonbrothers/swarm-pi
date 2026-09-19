@@ -202,6 +202,8 @@ export class Agent {
 		signal?: AbortSignal,
 	) => Promise<AgentLoopTurnUpdate | undefined> | AgentLoopTurnUpdate | undefined;
 	private activeRun?: ActiveRun;
+	/** Set by `requestStopAfterTurn`; makes the loop end after the turn in flight. */
+	private _stopAfterTurnRequested = false;
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -318,6 +320,29 @@ export class Agent {
 	/** Abort the current run, if one is active. */
 	abort(): void {
 		this.activeRun?.abortController.abort();
+	}
+
+	/**
+	 * Ask the loop to stop once the turn in flight finishes.
+	 *
+	 * Unlike {@link abort}, nothing is cut short: the assistant message
+	 * completes, every tool call of that turn runs and records its result, and
+	 * the loop then ends instead of making another model request. Queued
+	 * steering and follow-up messages stay queued. The request is sticky and
+	 * repeating it changes nothing.
+	 */
+	requestStopAfterTurn(): void {
+		this._stopAfterTurnRequested = true;
+	}
+
+	/** Whether a graceful stop after the current turn has been requested. */
+	get stopAfterTurnRequested(): boolean {
+		return this._stopAfterTurnRequested;
+	}
+
+	/** Undo a graceful stop request so the agent can run further turns. */
+	clearStopAfterTurnRequest(): void {
+		this._stopAfterTurnRequested = false;
 	}
 
 	/**
@@ -457,9 +482,12 @@ export class Agent {
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,
-			shouldStopAfterTurn: shouldStopAfterTurn
-				? async (context) => await shouldStopAfterTurn(context, this.signal)
-				: undefined,
+			// A graceful stop request wins over the caller's predicate: the loop must
+			// not start another model request once one has been made.
+			shouldStopAfterTurn: async (context) => {
+				if (this._stopAfterTurnRequested) return true;
+				return shouldStopAfterTurn ? await shouldStopAfterTurn(context, this.signal) : false;
+			},
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {

@@ -414,8 +414,12 @@ export interface Usage {
 	 * plan has one, and `codex_credits_balance`. On the WebSocket transport it also
 	 * adds the server's prompt token counts and timing for the turn
 	 * (`codex_engine_cached_prompt_tokens`, `codex_turn_time_s` and siblings).
+	 *
+	 * Almost every member is numeric. A few record a requested setting instead,
+	 * as the string pi sent: `codex_service_tier_requested` holds "priority" or
+	 * "flex" when the turn asked for a service tier, and is absent otherwise.
 	 */
-	providerExtra?: Record<string, number>;
+	providerExtra?: Record<string, number | string>;
 }
 
 export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred";
