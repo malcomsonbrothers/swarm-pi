@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type * as NodeZlib from "node:zlib";
 import type {
 	Tool as OpenAITool,
@@ -597,8 +600,9 @@ function buildRequestBody(
 		body.temperature = options.temperature;
 	}
 
-	if (options?.serviceTier !== undefined) {
-		body.service_tier = options.serviceTier;
+	const serviceTier = options?.serviceTier ?? codexServiceTierFromFlagFile();
+	if (serviceTier !== undefined) {
+		body.service_tier = serviceTier;
 	}
 
 	if (toolPlacement.immediate.length > 0) {
@@ -623,6 +627,20 @@ function buildRequestBody(
 	}
 
 	return body;
+}
+
+/**
+ * The owner's switch for the Codex service tier: the one word in
+ * ~/.pi/agent/codex-service-tier ("priority" or "flex"). No file, no tier.
+ * Read per request so the switch takes effect without a restart.
+ */
+function codexServiceTierFromFlagFile(): ResponseCreateParamsStreaming["service_tier"] | undefined {
+	try {
+		const word = readFileSync(join(homedir(), ".pi", "agent", "codex-service-tier"), "utf8").trim();
+		return word === "priority" || word === "flex" ? word : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function getServiceTierCostMultiplier(
