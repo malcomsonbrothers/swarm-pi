@@ -26,6 +26,7 @@ import {
 	printAuthCommandHelp,
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
+import { formatCapabilities } from "./cli/capabilities.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
@@ -620,6 +621,13 @@ export async function main(args: string[], options?: MainOptions) {
 		// The "+swarm" build marker lets the swarm daemon's preflight tell this
 		// fork from an upstream pi of the same version.
 		console.log(`${VERSION}+swarm`);
+		process.exit(0);
+	}
+
+	if (parsed.capabilities) {
+		// Answered before any runtime service, model or session is loaded, so a
+		// driver can ask what this build can do at no cost.
+		process.stdout.write(formatCapabilities());
 		process.exit(0);
 	}
 

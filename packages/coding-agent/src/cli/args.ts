@@ -21,6 +21,8 @@ export interface Args {
 	resume?: boolean;
 	help?: boolean;
 	version?: boolean;
+	/** Print the capability names this build advertises and exit. */
+	capabilities?: boolean;
 	mode?: Mode;
 	name?: string;
 	noSession?: boolean;
@@ -92,6 +94,8 @@ export function parseArgs(args: string[]): Args {
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
+		} else if (arg === "--capabilities") {
+			result.capabilities = true;
 		} else if (arg === "--mode") {
 			const mode = args[i + 1];
 			if (mode === undefined || mode.startsWith("-")) {
@@ -329,6 +333,7 @@ ${chalk.bold("Options:")}
   --                             End option parsing; treat remaining arguments as messages/files
   --help, -h                     Show this help
   --version, -v                  Show version number
+  --capabilities                 List the capability names this build advertises and exit
 
 Extensions can register additional flags (e.g., --plan from plan-mode extension).${extensionFlagsText}
 

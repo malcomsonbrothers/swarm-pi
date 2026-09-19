@@ -34,7 +34,7 @@ import { shortHash } from "../utils/hash.ts";
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
-import { resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { getCurrentSystemPrompt, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
 	type GrammarToolInputJsonBuffer,
@@ -230,7 +230,7 @@ export function convertResponsesMessages<TApi extends Api>(
 			content: [
 				{
 					type: "input_text",
-					text: `<model_switch>\nThe user was previously using a different model. Please continue the conversation according to the following instructions:\n\n${sanitizeSurrogates(context.systemPrompt ?? "")}\n</model_switch>`,
+					text: `<model_switch>\nThe user was previously using a different model. Please continue the conversation according to the following instructions:\n\n${sanitizeSurrogates(getCurrentSystemPrompt(normalizedContext.messages))}\n</model_switch>`,
 				},
 			],
 		});
@@ -614,7 +614,9 @@ export async function processResponsesStream<TApi extends Api>(
 				"input_tokens_details",
 				"output_tokens_details",
 			]);
-			const providerExtra: Record<string, number> = { ...priorExtra };
+			// Only numbers are read from the provider's usage object; a string member
+			// can only come from what pi itself stashed (the requested service tier).
+			const providerExtra: Record<string, number | string> = { ...priorExtra };
 			for (const [key, value] of Object.entries(response.usage)) {
 				if (modelledUsageKeys.has(key)) continue;
 				if (typeof value === "number" && Number.isFinite(value)) providerExtra[key] = value;
