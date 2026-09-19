@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
 	Api,
 	AssistantMessage,
@@ -61,6 +64,20 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
  */
+const CODEX_RESPONSES_API = "openai-codex-responses";
+
+/**
+ * True when an assistant message written by one Codex model is replayed to a
+ * different Codex model, whatever the provider is called (the vendor's own or a
+ * proxy in front of it). The owner's switch: the file
+ * ~/.pi/agent/codex-cross-model-off turns this off without a rebuild.
+ */
+export function keepsCodexReasoning(source: Pick<AssistantMessage, "api" | "model">, model: Model<Api>): boolean {
+	if (source.api !== CODEX_RESPONSES_API || model.api !== CODEX_RESPONSES_API) return false;
+	if (source.model === model.id) return false;
+	return !existsSync(join(homedir(), ".pi", "agent", "codex-cross-model-off"));
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
@@ -97,16 +114,20 @@ export function transformMessages<TApi extends Api>(
 				assistantMsg.api === model.api &&
 				assistantMsg.model === model.id;
 
+			// Codex to Codex: the backend accepts another Codex model's encrypted
+			// reasoning (the Codex CLI replays it unchanged on a model switch).
+			const keepsReasoning = isSameModel || keepsCodexReasoning(assistantMsg, model);
+
 			const transformedContent = assistantMsg.content.flatMap((block) => {
 				if (block.type === "thinking") {
 					// Redacted thinking is opaque encrypted content, only valid for the same model.
 					// Drop it for cross-model to avoid API errors.
 					if (block.redacted) {
-						return isSameModel ? block : [];
+						return keepsReasoning ? block : [];
 					}
 					// For same model: keep thinking blocks with signatures (needed for replay)
 					// even if the thinking text is empty (OpenAI encrypted reasoning)
-					if (isSameModel && block.thinkingSignature) return block;
+					if (keepsReasoning && block.thinkingSignature) return block;
 					// Skip empty thinking blocks, convert others to plain text
 					if (!block.thinking || block.thinking.trim() === "") return [];
 					if (isSameModel) return block;
