@@ -37,6 +37,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let unsubscribe: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let disposed = false;
+	let gracefulExitRequested = false;
+	let promptInFlight = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	const disposeRuntime = async (): Promise<void> => {
@@ -63,6 +65,28 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			process.on(signal, handler);
 			signalCleanupHandlers.push(() => process.off(signal, handler));
 		}
+
+		if (process.platform === "win32") return;
+
+		// SIGUSR2 asks for a graceful turn exit: finish the model turn in flight,
+		// including every tool result, start no further model request, and leave
+		// with 0. Idle between turns, there is nothing to finish, so leave now.
+		// Repeating the signal changes nothing. SIGTERM keeps its own behaviour.
+		const gracefulHandler = () => {
+			if (gracefulExitRequested) return;
+			gracefulExitRequested = true;
+			session.agent.requestStopAfterTurn();
+			if (promptInFlight) return;
+			// Idle: no turn to finish, so dispose and leave now. A prompt in flight
+			// instead runs to its end and the normal path returns 0.
+			void disposeRuntime()
+				.catch(() => {})
+				.finally(() => {
+					void flushRawStdout().finally(() => process.exit(0));
+				});
+		};
+		process.on("SIGUSR2", gracefulHandler);
+		signalCleanupHandlers.push(() => process.off("SIGUSR2", gracefulHandler));
 	};
 
 	registerSignalHandlers();
@@ -128,12 +152,25 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		await rebindSession();
 
-		if (initialMessage) {
-			await session.prompt(initialMessage, { images: initialImages });
+		// The in-flight flag tells the SIGUSR2 handler whether there is a turn to
+		// finish or nothing at all to wait for.
+		const runPrompt = async (send: () => Promise<unknown>): Promise<void> => {
+			promptInFlight = true;
+			try {
+				await send();
+			} finally {
+				promptInFlight = false;
+			}
+		};
+
+		if (initialMessage && !gracefulExitRequested) {
+			await runPrompt(() => session.prompt(initialMessage, { images: initialImages }));
 		}
 
 		for (const message of messages) {
-			await session.prompt(message);
+			// A graceful turn exit must not start another model request.
+			if (gracefulExitRequested) break;
+			await runPrompt(() => session.prompt(message));
 		}
 
 		if (mode === "text") {
@@ -155,7 +192,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			}
 		}
 
-		return exitCode;
+		// A turn stopped on request is a clean finish, not a failure.
+		return gracefulExitRequested ? 0 : exitCode;
 	} catch (error: unknown) {
 		console.error(error instanceof Error ? error.message : String(error));
 		return 1;

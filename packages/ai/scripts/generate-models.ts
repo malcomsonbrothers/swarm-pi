@@ -38,10 +38,38 @@ import {
 	getRadiusModelsFromConfig,
 	loadRadiusGatewayConfig,
 } from "../src/providers/radius-config.ts";
+import { describeKeptProviders, planProviderGeneration } from "./provider-generation-plan.ts";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
+
+/** Providers the last generation left on disk, or none when there is no generated catalog yet. */
+function readExistingGeneratedProviderIds(root: string): string[] {
+	try {
+		return readModelDataProviderIds(root);
+	} catch {
+		return [];
+	}
+}
+
+/** A previously generated provider data file, verbatim, or undefined when it cannot be kept. */
+function readExistingProviderData(path: string): string | undefined {
+	let content: string;
+	try {
+		content = readFileSync(path, "utf8");
+	} catch {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(content) as unknown;
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
+		if (Object.keys(parsed).length === 0) return undefined;
+	} catch {
+		return undefined;
+	}
+	return content;
+}
 
 function readGeneratorOptions(args: string[]): {
 	strict: boolean;
@@ -3166,21 +3194,51 @@ async function generateModels() {
 
 	const serializeJson = (value: unknown) => `${JSON.stringify(value, null, generatorOptions.pretty ? 2 : undefined)}\n`;
 	const writeJson = (path: string, value: unknown) => writeFileSync(path, serializeJson(value));
-	const generatedDataProviderIds = generatorOptions.dataOnly
-		? readModelDataProviderIds(packageRoot)
-		: sortedProviderIds;
-	const missingProviderIds = generatedDataProviderIds.filter((providerId) => !jsonProviders[providerId]);
-	if (missingProviderIds.length > 0) {
-		throw new Error(`Cannot hydrate missing providers: ${missingProviderIds.join(", ")}`);
+	// A provider whose fetch failed produced no models this run. Its existing
+	// generated data is kept verbatim rather than deleted, so a network failure
+	// cannot empty the catalog and break the offline half of the build.
+	const existingDataDir = join(packageRoot, "src/providers/data");
+	const keptProviderContents = new Map<string, string>();
+	if (!generatorOptions.jsonOnly) {
+		for (const providerId of readExistingGeneratedProviderIds(packageRoot)) {
+			if (jsonProviders[providerId]) continue;
+			const content = readExistingProviderData(join(existingDataDir, `${providerId}.json`));
+			if (content !== undefined) keptProviderContents.set(providerId, content);
+		}
 	}
+
+	const plan = planProviderGeneration({
+		requestedProviderIds: generatorOptions.dataOnly ? readModelDataProviderIds(packageRoot) : sortedProviderIds,
+		fetchedProviderIds: Object.keys(jsonProviders),
+		keepableProviderIds: keptProviderContents.keys(),
+	});
+	if (plan.missingProviderIds.length > 0) {
+		throw new Error(`Cannot hydrate missing providers: ${plan.missingProviderIds.join(", ")}`);
+	}
+	const generatedDataProviderIds = plan.outputProviderIds;
+	const keptNotice = describeKeptProviders(plan.keptProviderIds);
+	if (keptNotice) console.warn(keptNotice);
 
 	// Only the ignored internal data is grouped by API for type derivation. Public JSON catalog output stays flat.
 	const generatedDataProviders: Record<string, Record<string, Record<string, Model<Api>>>> = {};
 	const modelDataStructure: ModelDataStructure = {};
 	for (const providerId of generatedDataProviderIds) {
-		const models = jsonProviders[providerId];
 		generatedDataProviders[providerId] = {};
 		modelDataStructure[providerId] = {};
+
+		const keptContent = keptProviderContents.get(providerId);
+		if (keptContent !== undefined) {
+			const keptGroups = JSON.parse(keptContent) as Record<string, Record<string, Model<Api>>>;
+			for (const [api, keptModels] of Object.entries(keptGroups)) {
+				generatedDataProviders[providerId][api] = keptModels;
+				for (const modelId of Object.keys(keptModels)) {
+					modelDataStructure[providerId][modelId] = api;
+				}
+			}
+			continue;
+		}
+
+		const models = jsonProviders[providerId];
 		const apiIds = Array.from(new Set(Object.values(models).map((model) => model.api))).sort();
 		for (const api of apiIds) {
 			generatedDataProviders[providerId][api] = {};
@@ -3207,7 +3265,8 @@ async function generateModels() {
 			const fileContents: Record<string, string> = {};
 			for (const providerId of generatedDataProviderIds) {
 				const filename = `${providerId}.json`;
-				const content = serializeJson(generatedDataProviders[providerId]);
+				// A kept provider's file is copied byte for byte, so nothing about it changes.
+				const content = keptProviderContents.get(providerId) ?? serializeJson(generatedDataProviders[providerId]);
 				fileContents[filename] = content;
 				writeFileSync(join(stagedDataDir, filename), content);
 			}
@@ -3242,7 +3301,7 @@ async function generateModels() {
 				const catalogConstName = (providerId: string) =>
 					`${providerId.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_MODELS`;
 				const generatedShardFiles = new Set<string>();
-				for (const providerId of sortedProviderIds) {
+				for (const providerId of generatedDataProviderIds) {
 					let output = generatedHeader;
 					output += `import values from "./data/${providerId}.json" with { type: "json" };\n`;
 					output += `import { flattenModelCatalog, type ModelCatalog } from "../model-catalog.ts";\n\n`;
@@ -3257,15 +3316,15 @@ async function generateModels() {
 				}
 
 				let output = generatedHeader;
-				for (const providerId of sortedProviderIds) {
+				for (const providerId of generatedDataProviderIds) {
 					output += `import { ${catalogConstName(providerId)} } from "./providers/${providerId}.models.ts";\n`;
 				}
 				output += `\nexport const MODELS: {\n`;
-				for (const providerId of sortedProviderIds) {
+				for (const providerId of generatedDataProviderIds) {
 					output += `\treadonly ${JSON.stringify(providerId)}: typeof ${catalogConstName(providerId)};\n`;
 				}
 				output += `} = {\n`;
-				for (const providerId of sortedProviderIds) {
+				for (const providerId of generatedDataProviderIds) {
 					output += `\t${JSON.stringify(providerId)}: ${catalogConstName(providerId)},\n`;
 				}
 				output += `};\n`;

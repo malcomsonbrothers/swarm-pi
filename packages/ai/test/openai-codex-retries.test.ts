@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { streamSimple as streamOpenAICodexResponses } from "../src/api/openai-codex-responses.ts";
-import type { Context, FetchFunction, Model } from "../src/types.ts";
+import type { FetchFunction, Model } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 // The 2026-09-17 incident: Codex answered a burst with HTTP 429 and a Retry-After of
 // a few seconds, and the transport ended the turn on the first one and called it an
 // exhausted subscription. These tests pin the retry loop and the wording apart.
 
-const context: Context = {
+const context = normalizeContext({
 	messages: [{ role: "user", content: "hello", timestamp: 1 }],
-};
+});
 
 const apiKey = `header.${btoa(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "account" } }))}.signature`;
 

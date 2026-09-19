@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	renameSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +21,30 @@ const codingAgentDir = join(repoRoot, "packages", "coding-agent");
 const aiDistDir = join(repoRoot, "packages", "ai", "dist");
 const codingAgentDistDir = join(codingAgentDir, "dist");
 const bundleDir = join(codingAgentDistDir, "bundle");
+// The bundle is a live command: a daemon runs it, and sessions already running
+// lazy-import chunks by their hashed names. So the new bundle is built in a
+// sibling directory and swapped in by rename, and the previous bundle's chunks
+// that this build did not re-emit are carried over so those imports still
+// resolve after the swap.
+const stagingDir = join(codingAgentDistDir, `bundle.staging-${process.pid}`);
+const retiredDir = join(codingAgentDistDir, `bundle.retired-${process.pid}`);
+
+function copyCarriedOverChunks(previousBundleDir, nextBundleDir) {
+	const previousChunks = join(previousBundleDir, "chunks");
+	const nextChunks = join(nextBundleDir, "chunks");
+	if (!existsSync(previousChunks)) return 0;
+
+	mkdirSync(nextChunks, { recursive: true });
+	const present = new Set(readdirSync(nextChunks, { withFileTypes: true }).map((entry) => entry.name));
+	let carried = 0;
+	for (const entry of readdirSync(previousChunks, { withFileTypes: true })) {
+		if (!entry.isFile() || present.has(entry.name)) continue;
+		copyFileSync(join(previousChunks, entry.name), join(nextChunks, entry.name));
+		carried++;
+	}
+	return carried;
+}
+
 const banner = {
 	js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
 };
@@ -155,68 +188,92 @@ for (const entry of [
 	}
 }
 
-rmSync(bundleDir, { force: true, recursive: true });
-mkdirSync(bundleDir, { recursive: true });
+rmSync(stagingDir, { force: true, recursive: true });
+rmSync(retiredDir, { force: true, recursive: true });
+mkdirSync(stagingDir, { recursive: true });
 
-const mainResult = await build({
-	...commonBuildOptions(),
-	entryNames: "[name]",
-	entryPoints: {
-		"cli-runtime": join(codingAgentDistDir, "cli.js"),
-		index: join(codingAgentDistDir, "index.js"),
-		"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
-	},
-	outdir: bundleDir,
-	chunkNames: "chunks/[name]-[hash]",
-	splitting: true,
-});
+let carriedOverChunks = 0;
+try {
+	const mainResult = await build({
+		...commonBuildOptions(),
+		entryNames: "[name]",
+		entryPoints: {
+			"cli-runtime": join(codingAgentDistDir, "cli.js"),
+			index: join(codingAgentDistDir, "index.js"),
+			"rpc-entry": join(codingAgentDistDir, "rpc-entry.js"),
+		},
+		outdir: stagingDir,
+		chunkNames: "chunks/[name]-[hash]",
+		splitting: true,
+	});
 
-const bedrockLoaderOutput = findContainingOutput(mainResult.metafile, "packages/ai/dist/api/bedrock-converse-stream.lazy.js");
-const oauthLoaderOutput = findContainingOutput(mainResult.metafile, "packages/ai/dist/auth/oauth/load.js");
-const imageResizeOutput = findContainingOutput(mainResult.metafile, "packages/coding-agent/dist/utils/image-resize.js");
-if (dirname(bedrockLoaderOutput) !== dirname(oauthLoaderOutput)) {
-	throw new Error("Bedrock and OAuth lazy loaders were emitted into different directories");
-}
+	const bedrockLoaderOutput = findContainingOutput(mainResult.metafile, "packages/ai/dist/api/bedrock-converse-stream.lazy.js");
+	const oauthLoaderOutput = findContainingOutput(mainResult.metafile, "packages/ai/dist/auth/oauth/load.js");
+	const imageResizeOutput = findContainingOutput(mainResult.metafile, "packages/coding-agent/dist/utils/image-resize.js");
+	if (dirname(bedrockLoaderOutput) !== dirname(oauthLoaderOutput)) {
+		throw new Error("Bedrock and OAuth lazy loaders were emitted into different directories");
+	}
 
-// These implementations are reached through variable-specifier imports or a
-// worker URL, so the main bundle cannot follow them. Emit one self-contained
-// file per implementation beside the code that resolves it.
-const lazyResult = await build({
-	...commonBuildOptions(),
-	entryNames: "[name]",
-	entryPoints: {
-		anthropic: join(aiDistDir, "auth", "oauth", "anthropic.js"),
-		"bedrock-converse-stream": join(aiDistDir, "api", "bedrock-converse-stream.js"),
-		"github-copilot": join(aiDistDir, "auth", "oauth", "github-copilot.js"),
-		"image-resize-worker": join(codingAgentDistDir, "utils", "image-resize-worker.js"),
-		"kimi-coding": join(aiDistDir, "auth", "oauth", "kimi-coding.js"),
-		meta: join(aiDistDir, "auth", "oauth", "meta.js"),
-		"openai-codex": join(aiDistDir, "auth", "oauth", "openai-codex.js"),
-		openrouter: join(aiDistDir, "auth", "oauth", "openrouter.js"),
-		radius: join(aiDistDir, "auth", "oauth", "radius.js"),
-		xai: join(aiDistDir, "auth", "oauth", "xai.js"),
-	},
-	outdir: dirname(bedrockLoaderOutput),
-	splitting: false,
-});
+	// These implementations are reached through variable-specifier imports or a
+	// worker URL, so the main bundle cannot follow them. Emit one self-contained
+	// file per implementation beside the code that resolves it.
+	const lazyResult = await build({
+		...commonBuildOptions(),
+		entryNames: "[name]",
+		entryPoints: {
+			anthropic: join(aiDistDir, "auth", "oauth", "anthropic.js"),
+			"bedrock-converse-stream": join(aiDistDir, "api", "bedrock-converse-stream.js"),
+			"github-copilot": join(aiDistDir, "auth", "oauth", "github-copilot.js"),
+			"image-resize-worker": join(codingAgentDistDir, "utils", "image-resize-worker.js"),
+			"kimi-coding": join(aiDistDir, "auth", "oauth", "kimi-coding.js"),
+			meta: join(aiDistDir, "auth", "oauth", "meta.js"),
+			"openai-codex": join(aiDistDir, "auth", "oauth", "openai-codex.js"),
+			openrouter: join(aiDistDir, "auth", "oauth", "openrouter.js"),
+			radius: join(aiDistDir, "auth", "oauth", "radius.js"),
+			xai: join(aiDistDir, "auth", "oauth", "xai.js"),
+		},
+		outdir: dirname(bedrockLoaderOutput),
+		splitting: false,
+	});
 
-const imageResizeWorkerOutput = resolve(dirname(bedrockLoaderOutput), "image-resize-worker.js");
-if (dirname(imageResizeOutput) !== dirname(imageResizeWorkerOutput)) {
-	throw new Error("Image resize implementation and worker were emitted into different directories");
-}
+	const imageResizeWorkerOutput = resolve(dirname(bedrockLoaderOutput), "image-resize-worker.js");
+	if (dirname(imageResizeOutput) !== dirname(imageResizeWorkerOutput)) {
+		throw new Error("Image resize implementation and worker were emitted into different directories");
+	}
 
-validateExternalImports([mainResult.metafile, lazyResult.metafile]);
-const cliLauncher = `#!/usr/bin/env node
+	validateExternalImports([mainResult.metafile, lazyResult.metafile]);
+	const cliLauncher = `#!/usr/bin/env node
 import { createRequire, enableCompileCache } from "node:module";
 
 enableCompileCache();
 createRequire(import.meta.url)("./cli-runtime.js");
 `;
-writeFileSync(join(bundleDir, "cli.js"), cliLauncher);
-chmodSync(join(bundleDir, "cli.js"), 0o755);
-chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);
+	writeFileSync(join(stagingDir, "cli.js"), cliLauncher);
+	chmodSync(join(stagingDir, "cli.js"), 0o755);
+	chmodSync(join(stagingDir, "rpc-entry.js"), 0o755);
 
-const files =
-	new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size + 1;
-const mib = (outputBytes([mainResult.metafile, lazyResult.metafile]) + cliLauncher.length) / (1024 * 1024);
-console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB)`);
+	// Carry over the chunks this build did not re-emit, so a session that lazy
+	// imports one by its old hashed name still resolves it after the swap. Then
+	// swap by rename: the old bundle is complete until the first rename and the
+	// new one is complete from the second, instead of a whole build's worth of
+	// writing into a directory the live command is reading.
+	carriedOverChunks = copyCarriedOverChunks(bundleDir, stagingDir);
+	const hadPreviousBundle = existsSync(bundleDir);
+	if (hadPreviousBundle) renameSync(bundleDir, retiredDir);
+	try {
+		renameSync(stagingDir, bundleDir);
+	} catch (error) {
+		if (hadPreviousBundle && !existsSync(bundleDir)) renameSync(retiredDir, bundleDir);
+		throw error;
+	}
+
+	const files =
+		new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size + 1;
+	const mib = (outputBytes([mainResult.metafile, lazyResult.metafile]) + cliLauncher.length) / (1024 * 1024);
+	const carried = carriedOverChunks > 0 ? `, ${carriedOverChunks} chunk(s) carried over` : "";
+	console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB${carried})`);
+} finally {
+	// Whatever happened, leave no staging or retired directory beside the bundle.
+	rmSync(stagingDir, { force: true, recursive: true });
+	rmSync(retiredDir, { force: true, recursive: true });
+}
