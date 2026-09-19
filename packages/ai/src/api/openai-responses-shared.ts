@@ -43,7 +43,7 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
-import { transformMessages } from "./transform-messages.ts";
+import { keepsCodexReasoning, transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
 // Utilities
@@ -165,7 +165,8 @@ export function convertResponsesMessages<TApi extends Api>(
 		if (!id.includes("|")) return normalizeIdPart(id);
 		const [callId, itemId] = id.split("|");
 		const normalizedCallId = normalizeIdPart(callId);
-		const isForeignToolCall = source.provider !== model.provider || source.api !== model.api;
+		const isForeignToolCall =
+			(source.provider !== model.provider || source.api !== model.api) && !keepsCodexReasoning(source, model);
 		let normalizedItemId = isForeignToolCall ? buildForeignResponsesItemId(itemId) : normalizeIdPart(itemId);
 		// OpenAI Responses API requires item id to start with "fc"
 		if (!normalizedItemId.startsWith("fc_")) {
@@ -212,9 +213,35 @@ export function convertResponsesMessages<TApi extends Api>(
 	const compat = model.compat as { supportsDeveloperRole?: boolean } | undefined;
 	const instructionRole = model.reasoning && compat?.supportsDeveloperRole !== false ? "developer" : "system";
 
+	// A Codex session that continues on a different Codex model gets the Codex
+	// CLI's own notice, once, after the last turn the earlier model wrote.
+	let modelSwitchAt = -1;
+	for (let i = transformedMessages.length - 1; i >= 0; i--) {
+		const candidate = transformedMessages[i];
+		if (candidate.role === "assistant" && keepsCodexReasoning(candidate as AssistantMessage, model)) {
+			modelSwitchAt = i + 1;
+			while (transformedMessages[modelSwitchAt]?.role === "toolResult") modelSwitchAt++;
+			break;
+		}
+	}
+	const pushModelSwitch = () => {
+		messages.push({
+			role: "developer",
+			content: [
+				{
+					type: "input_text",
+					text: `<model_switch>\nThe user was previously using a different model. Please continue the conversation according to the following instructions:\n\n${sanitizeSurrogates(context.systemPrompt ?? "")}\n</model_switch>`,
+				},
+			],
+		});
+	};
+
 	let msgIndex = 0;
+	let transformedIndex = -1;
 	let sourceIndex = 0;
 	for (const msg of transformedMessages) {
+		transformedIndex++;
+		if (transformedIndex === modelSwitchAt) pushModelSwitch();
 		const isLeadingSystemMessage = sourceIndex++ === 0 && msg.role === "system";
 		if (msg.role === "system") {
 			if (!isLeadingSystemMessage) appendSystemToolAdditions(msg, `system:${msgIndex}`);
@@ -255,7 +282,9 @@ export function convertResponsesMessages<TApi extends Api>(
 			const assistantMsg = msg as AssistantMessage;
 			const isSameProviderAndApi = assistantMsg.provider === model.provider && assistantMsg.api === model.api;
 			const isSameModel = isSameProviderAndApi && assistantMsg.model === model.id;
-			const isDifferentModel = isSameProviderAndApi && assistantMsg.model !== model.id;
+			// Codex to Codex keeps the reasoning items, so the call ids stay paired with them.
+			const isDifferentModel =
+				isSameProviderAndApi && assistantMsg.model !== model.id && !keepsCodexReasoning(assistantMsg, model);
 			let textBlockIndex = 0;
 
 			for (const block of msg.content) {
@@ -348,6 +377,7 @@ export function convertResponsesMessages<TApi extends Api>(
 		}
 		if (!isLeadingSystemMessage) msgIndex++;
 	}
+	if (modelSwitchAt === transformedMessages.length) pushModelSwitch();
 
 	return messages;
 }
