@@ -1213,7 +1213,7 @@ export class AgentSession {
 		try {
 			await this.agent.prompt(messages);
 			while (await this._handlePostAgentRun()) {
-				if (this._agentRunAbortRequested) break;
+				if (this._agentRunAbortRequested || this.agent.noNewRequestsSignal.aborted) break;
 				await this.agent.continue();
 			}
 		} finally {
@@ -2063,6 +2063,7 @@ export class AgentSession {
 			this.settingsManager.getRetrySettings(),
 			this._summarizationRetryCallbacks({ source: "compaction", reason }),
 			undefined, // sessionId
+			this.agent.noNewRequestsSignal,
 		);
 	}
 
@@ -2397,6 +2398,7 @@ export class AgentSession {
 	 * @returns Whether the post-run loop should call `agent.continue()`
 	 */
 	private async _runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<boolean> {
+		if (this.agent.noNewRequestsSignal.aborted) return false;
 		const model = this.model;
 		const settings = this.settingsManager.getCompactionSettings(model);
 		let abortController: AbortController | undefined;
@@ -2486,6 +2488,9 @@ export class AgentSession {
 				details = compactResult.details;
 			}
 			abortController.signal.throwIfAborted();
+			if (this.agent.noNewRequestsSignal.aborted) {
+				throw new Error("Compaction cancelled by graceful stop");
+			}
 
 			this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
 			const newEntries = this.sessionManager.getEntries();
@@ -2536,7 +2541,8 @@ export class AgentSession {
 			return this.agent.hasQueuedMessages();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : "compaction failed";
-			const aborted = abortController?.signal.aborted === true || cancelledByExtension;
+			const aborted =
+				abortController?.signal.aborted === true || cancelledByExtension || this.agent.noNewRequestsSignal.aborted;
 			if (started) {
 				const errorMessage = aborted
 					? undefined
@@ -3042,7 +3048,7 @@ export class AgentSession {
 	 */
 	private async _prepareRetry(message: AssistantMessage): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled) {
+		if (!settings.enabled || this.agent.noNewRequestsSignal.aborted) {
 			return false;
 		}
 
@@ -3073,7 +3079,7 @@ export class AgentSession {
 		// Wait with exponential backoff (abortable)
 		this._retryAbortController = new AbortController();
 		try {
-			await sleep(delayMs, this._retryAbortController.signal);
+			await sleep(delayMs, AbortSignal.any([this._retryAbortController.signal, this.agent.noNewRequestsSignal]));
 		} catch {
 			// Aborted during sleep - emit end event so UI can clean up
 			this._finishCancelledRetry();
@@ -3360,6 +3366,7 @@ export class AgentSession {
 					reserveTokens: branchSummarySettings.reserveTokens,
 					streamFn: this.agent.streamFunction,
 					retry: this.settingsManager.getRetrySettings(),
+					noNewRequests: this.agent.noNewRequestsSignal,
 					callbacks: this._summarizationRetryCallbacks({ source: "branchSummary" }),
 				});
 				if (result.aborted) {

@@ -87,6 +87,8 @@ export interface GenerateBranchSummaryOptions {
 	retry?: RetryPolicy;
 	/** Optional callbacks for retry reporting (e.g. TUI retry indicators). */
 	callbacks?: RetryCallbacks;
+	/** Prevents a new summary request after a graceful stop without aborting one in flight. */
+	noNewRequests?: AbortSignal;
 }
 
 // ============================================================================
@@ -306,6 +308,7 @@ export async function generateBranchSummary(
 		streamFn,
 		retry,
 		callbacks,
+		noNewRequests,
 	} = options;
 
 	// Token budget = context window minus reserved space for prompt + response
@@ -349,7 +352,7 @@ export async function generateBranchSummary(
 	// without running through agent state/events. Retried via completeSummarization
 	// so transient stream drops reuse the configured retry policy.
 	const context = normalizeContext({ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages });
-	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens };
+	const requestOptions: SimpleStreamOptions = { apiKey, headers, env, signal, maxTokens, noNewRequests };
 	const response = await completeSummarization(model, context, requestOptions, streamFn, retry, callbacks);
 
 	// Check if aborted or errored

@@ -172,6 +172,7 @@ function getRetryAfterDelayMs(headers: Headers): number | undefined {
 }
 
 class RetryDelayExceededError extends Error {}
+class NoNewRequestError extends Error {}
 
 function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number {
 	const maxRetryDelayMs = options?.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
@@ -183,30 +184,51 @@ function validateRetryDelayMs(delayMs: number, options?: StreamOptions): number 
 	return delayMs;
 }
 
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+function sleep(ms: number, signal?: AbortSignal, noNewRequests?: AbortSignal): Promise<void> {
 	return new Promise((resolve, reject) => {
 		if (signal?.aborted) {
 			reject(new Error("Request was aborted"));
 			return;
 		}
+		if (noNewRequests?.aborted) {
+			reject(new NoNewRequestError("No new provider request after graceful stop"));
+			return;
+		}
 		let settled = false;
 		let timeout: ReturnType<typeof setTimeout>;
+		const cleanup = () => {
+			clearTimeout(timeout);
+			signal?.removeEventListener("abort", onAbort);
+			noNewRequests?.removeEventListener("abort", onNoNewRequest);
+		};
 		const onAbort = () => {
 			if (settled) return;
 			settled = true;
-			clearTimeout(timeout);
-			signal?.removeEventListener("abort", onAbort);
+			cleanup();
 			reject(new Error("Request was aborted"));
+		};
+		const onNoNewRequest = () => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			reject(new NoNewRequestError("No new provider request after graceful stop"));
 		};
 		const onTimeout = () => {
 			if (settled) return;
 			settled = true;
-			signal?.removeEventListener("abort", onAbort);
+			cleanup();
 			resolve();
 		};
 		timeout = setTimeout(onTimeout, ms);
 		signal?.addEventListener("abort", onAbort, { once: true });
+		noNewRequests?.addEventListener("abort", onNoNewRequest, { once: true });
 	});
+}
+
+function assertNewRequestAllowed(noNewRequests?: AbortSignal): void {
+	if (noNewRequests?.aborted) {
+		throw new NoNewRequestError("No new provider request after graceful stop");
+	}
 }
 
 /**
@@ -368,6 +390,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				let retriedWebSocketConnectionLimit = false;
 				let retriedMissingWebSocketContinuation = false;
 				while (true) {
+					assertNewRequestAllowed(options?.noNewRequests);
 					websocketStarted = false;
 					try {
 						await processWebSocketStream(
@@ -407,6 +430,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						stream.end();
 						return;
 					} catch (error) {
+						if (options?.noNewRequests?.aborted) throw error;
 						const aborted = options?.signal?.aborted;
 						const connectionLimitBeforeStart = !websocketStarted && isWebSocketConnectionLimitReachedError(error);
 						const previousResponseNotFound = isPreviousResponseNotFoundError(error);
@@ -461,6 +485,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				if (options?.signal?.aborted) {
 					throw new Error("Request was aborted");
 				}
+				if (options?.noNewRequests?.aborted) {
+					throw lastError ?? new NoNewRequestError("No new provider request after graceful stop");
+				}
 
 				try {
 					const headerTimeoutSignal =
@@ -500,7 +527,12 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 
 						retryAttempts++;
 						lastRetryAfterSeconds = retryAfterDelayMs === undefined ? undefined : retryAfterDelayMs / 1000;
-						await sleep(delayMs, options?.signal);
+						const retryInfo = await parseErrorResponse(
+							new Response(errorText, { status: response.status, statusText: response.statusText }),
+							retryAttempts,
+						);
+						lastError = new CodexHttpError(retryInfo.friendlyMessage || retryInfo.message);
+						await sleep(delayMs, options?.signal, options?.noNewRequests);
 						continue;
 					}
 
@@ -512,6 +544,9 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 					const info = await parseErrorResponse(fakeResponse, retryAttempts);
 					throw new CodexHttpError(info.friendlyMessage || info.message);
 				} catch (error) {
+					if (error instanceof NoNewRequestError) {
+						throw lastError ?? error;
+					}
 					if (error instanceof Error) {
 						if (error.name === "AbortError" || error.message === "Request was aborted") {
 							throw new Error("Request was aborted");
@@ -1780,6 +1815,7 @@ async function processWebSocketStream(
 ): Promise<void> {
 	// Each attempt observes its own meter reading; a failed attempt's must not survive into the retry.
 	resetProviderExtra(output);
+	assertNewRequestAllowed(options?.noNewRequests);
 	const { socket, entry, reused, release } = await acquireWebSocket(
 		url,
 		headers,
@@ -1814,6 +1850,7 @@ async function processWebSocketStream(
 		}
 	}
 	try {
+		assertNewRequestAllowed(options?.noNewRequests);
 		socket.send(JSON.stringify({ type: "response.create", ...requestBody }));
 		await processResponsesStream(
 			startWebSocketOutputOnFirstEvent(

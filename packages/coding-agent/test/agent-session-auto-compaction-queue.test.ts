@@ -132,6 +132,56 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(continueSpy).not.toHaveBeenCalled();
 	});
 
+	it("does not start a summarization retry after graceful stop", async () => {
+		settingsManager.applyOverrides({
+			compaction: { keepRecentTokens: 1 },
+			retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 },
+		});
+		const model = session.model!;
+		sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "message to compact" }],
+			timestamp: Date.now() - 1000,
+		});
+		sessionManager.appendMessage({
+			...fauxAssistantMessage("assistant response to compact"),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now() - 500,
+		});
+		session.agent.state.messages = sessionManager.buildSessionContext().messages;
+
+		let calls = 0;
+		session.agent.streamFunction = (summaryModel) => {
+			calls++;
+			const stream = createAssistantMessageEventStream();
+			queueMicrotask(() => {
+				session.agent.requestStopAfterTurn();
+				const message = {
+					...fauxAssistantMessage(""),
+					api: summaryModel.api,
+					provider: summaryModel.provider,
+					model: summaryModel.id,
+					stopReason: "error" as const,
+					errorMessage: "overloaded_error",
+				};
+				stream.push({ type: "start", partial: message });
+				stream.push({ type: "error", reason: "error", error: message });
+			});
+			return stream;
+		};
+
+		const runAutoCompaction = (
+			session as unknown as {
+				_runAutoCompaction: (reason: "overflow" | "threshold", willRetry: boolean) => Promise<boolean>;
+			}
+		)._runAutoCompaction.bind(session);
+
+		await expect(runAutoCompaction("threshold", false)).resolves.toBe(false);
+		expect(calls).toBe(1);
+	});
+
 	it("should not compact repeatedly after overflow recovery already attempted", async () => {
 		const model = session.model!;
 		const overflowMessage: AssistantMessage = {

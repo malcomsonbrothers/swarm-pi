@@ -619,6 +619,9 @@ export class ModelRuntime implements Models {
 				model,
 				options as (StreamOptions & ModelsRequestTransforms) | undefined,
 			);
+			if (prepared.options.noNewRequests?.aborted) {
+				throw new Error("No new provider request after graceful stop");
+			}
 			return prepared.provider.stream(
 				prepared.model as Model<TApi>,
 				transcript,
@@ -639,6 +642,9 @@ export class ModelRuntime implements Models {
 		const transcript = normalizeContext(context);
 		return lazyStream(model, async () => {
 			const prepared = await this.prepareRequest(model, options);
+			if (prepared.options.noNewRequests?.aborted) {
+				throw new Error("No new provider request after graceful stop");
+			}
 			return prepared.provider.streamSimple(prepared.model, transcript, prepared.options as SimpleStreamOptions);
 		});
 	}

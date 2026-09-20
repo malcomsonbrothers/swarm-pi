@@ -130,6 +130,11 @@ export interface ProviderResponse {
 /** Authentication, HTTP transport, and lifecycle callbacks shared by provider requests. */
 export interface ProviderRequestOptions<TModel = Model<Api>> {
 	signal?: AbortSignal;
+	/**
+	 * Observable gate that prevents a new provider request after a graceful stop.
+	 * Providers must not use this as the cancellation signal for a request already in flight.
+	 */
+	noNewRequests?: AbortSignal;
 	/** Explicit parent context for telemetry produced by this logical request. */
 	telemetryContext?: TelemetryContext;
 	apiKey?: string;

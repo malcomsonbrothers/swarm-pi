@@ -214,6 +214,18 @@ describe("cache warming", () => {
 		expect(unavailable.calls).toHaveLength(0);
 	});
 
+	it("cancels scheduled warming when no new requests are allowed", async () => {
+		vi.useFakeTimers();
+		const gate = new AbortController();
+		const { warmer, calls } = fakeRuntime();
+		warmer.start(request(adaptiveModel, { noNewRequests: gate.signal }), current);
+		gate.abort();
+		await vi.advanceTimersByTimeAsync(270_000);
+
+		expect(calls).toHaveLength(0);
+		expect(warmer.status).toMatchObject({ state: "inactive", reason: "graceful stop requested" });
+	});
+
 	it("stops for unsupported requests, context changes, and mode changes", async () => {
 		vi.useFakeTimers();
 		const unsupported = fakeRuntime();

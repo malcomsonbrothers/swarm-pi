@@ -149,6 +149,7 @@ interface ActiveRun extends CacheWarmRequest {
 	/** Set while a refresh that an extension forced is in flight. */
 	extensionOverride: boolean;
 	timer?: ReturnType<typeof setTimeout>;
+	noNewRequestsListener?: () => void;
 }
 
 /**
@@ -224,7 +225,7 @@ export class CacheWarmer {
 			this.stop("cache lifetime unavailable");
 			return;
 		}
-		this.run = {
+		const run: ActiveRun = {
 			...request,
 			isCurrent,
 			delayMs,
@@ -234,7 +235,20 @@ export class CacheWarmer {
 			nextWarmAt: 0,
 			extensionOverride: false,
 		};
-		this.schedule(this.run);
+		this.run = run;
+		const noNewRequests = request.options.noNewRequests;
+		if (noNewRequests) {
+			const listener = () => {
+				if (this.run !== run) return;
+				// A scheduled refresh has not started a provider request. A refresh
+				// already executing is allowed to finish normally.
+				if (run.timer) this.stop("graceful stop requested");
+			};
+			run.noNewRequestsListener = listener;
+			noNewRequests.addEventListener("abort", listener, { once: true });
+			if (noNewRequests.aborted) listener();
+		}
+		this.schedule(run);
 	}
 
 	onAgentSettled(): void {
@@ -268,6 +282,7 @@ export class CacheWarmer {
 		if (!run) return;
 		this.run = undefined;
 		if (run.timer) clearTimeout(run.timer);
+		run.options.noNewRequests?.removeEventListener("abort", run.noNewRequestsListener!);
 		run.controller.abort();
 	}
 
@@ -277,6 +292,10 @@ export class CacheWarmer {
 	}
 
 	private schedule(run: ActiveRun): void {
+		if (run.options.noNewRequests?.aborted) {
+			this.stop("graceful stop requested");
+			return;
+		}
 		run.extensionOverride = false;
 		run.nextWarmAt = Date.now() + run.delayMs;
 		const deadline = run.startedAt + (run.phase === "idle" ? MAX_IDLE_WARMING_AGE_MS : MAX_WARMING_AGE_MS);
@@ -291,6 +310,10 @@ export class CacheWarmer {
 	private async refresh(run: ActiveRun): Promise<void> {
 		run.timer = undefined;
 		if (!this.validateRun(run)) return;
+		if (run.options.noNewRequests?.aborted) {
+			this.stop("graceful stop requested");
+			return;
+		}
 		const decision = this.evaluate(run);
 		const { warmCost, missCost, continuationProbability } = decision;
 		let action = decision.action;
@@ -318,6 +341,10 @@ export class CacheWarmer {
 		}
 
 		run.extensionOverride = extensionOverride;
+		if (run.options.noNewRequests?.aborted) {
+			this.stop("graceful stop requested");
+			return;
+		}
 		try {
 			const message = await this.models
 				.streamSimple(run.model, run.context, {
@@ -356,6 +383,7 @@ export class CacheWarmer {
 		const mode = this.getMode();
 		if (mode === "off") return "cache warming disabled";
 		if (mode === "streaming" && run.phase === "idle") return "agent run settled";
+		if (run.options.noNewRequests?.aborted) return "graceful stop requested";
 		return undefined;
 	}
 

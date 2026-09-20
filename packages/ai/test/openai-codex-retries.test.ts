@@ -150,6 +150,20 @@ describe("OpenAI Codex retries", () => {
 		expect(output.errorMessage).toContain("Request was aborted");
 	});
 
+	it("does not start a retry after the graceful no-new-request gate closes", async () => {
+		const scripted = scriptedFetch([
+			() => rateLimited(JSON.stringify({ detail: "Rate limit exceeded" }), { "retry-after": "30" }),
+		]);
+		const gate = new AbortController();
+		setTimeout(() => gate.abort(), 20);
+
+		const output = await run(scripted.fetch, { noNewRequests: gate.signal });
+
+		expect(scripted.calls()).toBe(1);
+		expect(output.stopReason).toBe("error");
+		expect(output.errorMessage).toContain("Codex rate limit: Rate limit exceeded");
+	});
+
 	it("removes the retry wait abort listener when the delay resolves", async () => {
 		const scripted = scriptedFetch([
 			() => rateLimited(JSON.stringify({ detail: "Rate limit exceeded" }), { "retry-after": "0" }),

@@ -375,6 +375,7 @@ async function streamAssistantResponse(
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 
 	if (checkStopBeforeRequest && (await config.shouldStopBeforeNextTurn?.())) return undefined;
+	if (config.noNewRequests?.aborted) return undefined;
 
 	const response = await streamFunction(config.model, llmContext, {
 		...config,

@@ -219,6 +219,8 @@ export class Agent {
 	private activeRun?: ActiveRun;
 	/** Set by `requestStopAfterTurn`; makes the loop end after the turn in flight. */
 	private _stopAfterTurnRequested = false;
+	/** Separate from the active-run signal: closing it blocks new requests without aborting the current one. */
+	private _noNewRequestsController = new AbortController();
 	/** Session identifier forwarded to providers for cache-aware backends. */
 	public sessionId?: string;
 	/** Optional per-level thinking token budgets forwarded to the stream function. */
@@ -332,6 +334,11 @@ export class Agent {
 		return this.activeRun?.abortController.signal;
 	}
 
+	/** Observable gate for provider paths: abort means no new request may start. */
+	get noNewRequestsSignal(): AbortSignal {
+		return this._noNewRequestsController.signal;
+	}
+
 	/** Abort the current run, if one is active. */
 	abort(): void {
 		this.activeRun?.abortController.abort();
@@ -348,6 +355,7 @@ export class Agent {
 	 */
 	requestStopAfterTurn(): void {
 		this._stopAfterTurnRequested = true;
+		this._noNewRequestsController.abort();
 	}
 
 	/** Whether a graceful stop after the current turn has been requested. */
@@ -358,6 +366,9 @@ export class Agent {
 	/** Undo a graceful stop request so the agent can run further turns. */
 	clearStopAfterTurnRequest(): void {
 		this._stopAfterTurnRequested = false;
+		if (this._noNewRequestsController.signal.aborted) {
+			this._noNewRequestsController = new AbortController();
+		}
 	}
 
 	/**
@@ -393,6 +404,11 @@ export class Agent {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
+		}
+		// A stop requested while idle applies to the next turn, not to a later
+		// independent prompt. Continuations never reopen this gate.
+		if (this._stopAfterTurnRequested && this._noNewRequestsController.signal.aborted) {
+			this._noNewRequestsController = new AbortController();
 		}
 		const messages = this.normalizePromptInput(input, images);
 		await this.runPromptMessages(messages);
@@ -494,6 +510,7 @@ export class Agent {
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
+			noNewRequests: this._noNewRequestsController.signal,
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,

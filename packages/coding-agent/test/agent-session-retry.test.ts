@@ -150,6 +150,18 @@ describe("AgentSession retry", () => {
 		expect(created.session.isRetrying).toBe(false);
 	});
 
+	it("does not start an automatic retry after graceful stop", async () => {
+		const created = await createSession({ failCount: 99, maxRetries: 2, maxAgentDelayMs: 1000 });
+		created.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") created.session.agent.requestStopAfterTurn();
+		});
+
+		await created.session.prompt("Test");
+
+		expect(created.getCallCount()).toBe(1);
+		expect(created.session.isRetrying).toBe(false);
+	});
+
 	it("exhausts max retries and emits failure", async () => {
 		const created = await createSession({ failCount: 99, maxRetries: 2 });
 		const events: string[] = [];

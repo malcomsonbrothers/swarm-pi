@@ -573,8 +573,9 @@ function createSummarizationOptions(
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
 	sessionId: string | undefined,
+	noNewRequests: AbortSignal | undefined,
 ): SimpleStreamOptions {
-	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env, sessionId };
+	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env, sessionId, noNewRequests };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -603,11 +604,20 @@ export async function completeSummarization(
 		cacheRetention: "none",
 		sessionId: options.sessionId ?? uuidv7(),
 	};
-	const produce = async (): Promise<AssistantMessage> =>
-		streamFn
+	const produce = async (): Promise<AssistantMessage> => {
+		if (requestOptions.noNewRequests?.aborted) {
+			throw new Error("No new provider request after graceful stop");
+		}
+		return streamFn
 			? (await streamFn(model, context, requestOptions)).result()
 			: completeSimple(model, context, requestOptions);
-	return retryAssistantCall(produce, retry, requestOptions.signal, callbacks);
+	};
+	const retrySignal = requestOptions.noNewRequests
+		? requestOptions.signal
+			? AbortSignal.any([requestOptions.signal, requestOptions.noNewRequests])
+			: requestOptions.noNewRequests
+		: requestOptions.signal;
+	return retryAssistantCall(produce, retry, retrySignal, callbacks);
 }
 
 /**
@@ -629,6 +639,7 @@ export async function generateSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	noNewRequests?: AbortSignal,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -646,6 +657,7 @@ export async function generateSummary(
 			retry,
 			callbacks,
 			sessionId,
+			noNewRequests,
 		)
 	).text;
 }
@@ -680,6 +692,7 @@ export async function generateSummaryWithUsage(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	noNewRequests?: AbortSignal,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -713,6 +726,7 @@ export async function generateSummaryWithUsage(
 		signal,
 		thinkingLevel,
 		sessionId,
+		noNewRequests,
 	);
 
 	const response = await completeSummarization(
@@ -880,6 +894,7 @@ export async function compact(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	noNewRequests?: AbortSignal,
 ): Promise<CompactionResult> {
 	const {
 		firstKeptEntryId,
@@ -915,6 +930,7 @@ export async function compact(
 				retry,
 				callbacks,
 				sessionId,
+				noNewRequests,
 			);
 			historyText = historyResult.text;
 			historyUsage = historyResult.usage;
@@ -932,6 +948,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			noNewRequests,
 		);
 		// Merge into single summary
 		summary = `${historyText}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult.text}`;
@@ -953,6 +970,7 @@ export async function compact(
 			retry,
 			callbacks,
 			sessionId,
+			noNewRequests,
 		);
 		summary = result.text;
 		summaryUsage = result.usage;
@@ -991,6 +1009,7 @@ async function generateTurnPrefixSummary(
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
+	noNewRequests?: AbortSignal,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.5 * reserveTokens),
@@ -1003,7 +1022,17 @@ async function generateTurnPrefixSummary(
 	const response = await completeSummarization(
 		model,
 		buildSummarizationContext(promptText),
-		createSummarizationOptions(model, maxTokens, apiKey, headers, env, signal, thinkingLevel, sessionId),
+		createSummarizationOptions(
+			model,
+			maxTokens,
+			apiKey,
+			headers,
+			env,
+			signal,
+			thinkingLevel,
+			sessionId,
+			noNewRequests,
+		),
 		streamFn,
 		retry,
 		callbacks,
