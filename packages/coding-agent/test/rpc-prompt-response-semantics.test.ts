@@ -17,7 +17,7 @@ import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createInMemoryModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
-import { createTestResourceLoader } from "./utilities.ts";
+import { createTestExtensionsResult, createTestResourceLoader } from "./utilities.ts";
 
 const rpcIo = vi.hoisted(() => ({
 	outputLines: [] as string[],
@@ -95,9 +95,15 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
+async function createRuntimeHost(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	preflightGate?: Promise<void>;
+}): Promise<{
 	runtimeHost: AgentSessionRuntime;
 	cleanup: () => Promise<void>;
+	getStreamCalls: () => number;
 }> {
 	const tempDir = join(tmpdir(), `pi-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
@@ -107,6 +113,17 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 		throw new Error("Test model not found");
 	}
 
+	let streamCalls = 0;
+	const extensionsResult = options.preflightGate
+		? await createTestExtensionsResult([
+				(pi) => {
+					pi.on("before_agent_start", async () => {
+						await options.preflightGate;
+					});
+				},
+			])
+		: undefined;
+
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -115,6 +132,7 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 			tools: [],
 		},
 		streamFn: (_model, _context, _options) => {
+			streamCalls++;
 			const stream = new MockAssistantStream();
 			queueMicrotask(() => {
 				stream.push({ type: "start", partial: createAssistantMessage("") });
@@ -140,7 +158,7 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 		settingsManager,
 		cwd: tempDir,
 		modelRuntime: getModelRuntime(modelRegistry),
-		resourceLoader: createTestResourceLoader(),
+		resourceLoader: createTestResourceLoader({ extensionsResult }),
 	});
 
 	const runtimeHost = {
@@ -165,21 +183,41 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 				rmSync(tempDir, { recursive: true });
 			}
 		},
+		getStreamCalls: () => streamCalls,
 	};
 }
 
-async function startRpcMode(options: { withAuth: boolean; responseDelayMs: number; model?: Model<any> }): Promise<{
+async function startRpcMode(options: {
+	withAuth: boolean;
+	responseDelayMs: number;
+	model?: Model<any>;
+	preflightGate?: Promise<void>;
+}): Promise<{
 	lineHandler: (line: string) => void;
 	cleanup: () => Promise<void>;
+	runtimeHost: AgentSessionRuntime;
+	getStreamCalls: () => number;
 }> {
 	rpcIo.outputLines = [];
 	rpcIo.lineHandler = undefined;
 
-	const { runtimeHost, cleanup } = await createRuntimeHost(options);
+	const signalNames: NodeJS.Signals[] = ["SIGTERM", "SIGHUP", "SIGUSR2"];
+	const signalListeners = new Map<NodeJS.Signals, Set<NodeJS.SignalsListener>>();
+	for (const signal of signalNames) signalListeners.set(signal, new Set(process.listeners(signal)));
+	const { runtimeHost, cleanup: cleanupRuntime, getStreamCalls } = await createRuntimeHost(options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 
-	return { lineHandler: rpcIo.lineHandler!, cleanup };
+	const cleanup = async () => {
+		await cleanupRuntime();
+		for (const signal of signalNames) {
+			for (const listener of process.listeners(signal)) {
+				if (!signalListeners.get(signal)?.has(listener)) process.off(signal, listener);
+			}
+		}
+	};
+
+	return { lineHandler: rpcIo.lineHandler!, cleanup, runtimeHost, getStreamCalls };
 }
 
 describe("RPC prompt response semantics", () => {
@@ -280,6 +318,100 @@ describe("RPC prompt response semantics", () => {
 
 			await sleep(150);
 		} finally {
+			await cleanup();
+		}
+	});
+
+	it("waits for an in-flight bash command and its session entry before graceful exit", async () => {
+		const { lineHandler, cleanup, runtimeHost } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const exitCodes: number[] = [];
+		let exitSnapshot: { responseCount: number; hasBashEntry: boolean } | undefined;
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			exitSnapshot = {
+				responseCount: parseOutputLines(rpcIo.outputLines).filter(
+					(record) => record.id === "bash-stop" && record.command === "bash",
+				).length,
+				hasBashEntry: runtimeHost.session.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "message" && entry.message.role === "bashExecution"),
+			};
+			return undefined as never;
+		});
+
+		try {
+			lineHandler(JSON.stringify({ id: "bash-stop", type: "bash", command: "sleep 0.05; printf bash-done" }));
+			process.emit("SIGUSR2");
+
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+			expect(exitSnapshot).toEqual({ responseCount: 1, hasBashEntry: true });
+			expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+				expect.objectContaining({ id: "bash-stop", command: "bash", success: true }),
+			);
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("refuses a prompt still in preflight after graceful stop without a provider request", async () => {
+		let releasePreflight!: () => void;
+		const preflightGate = new Promise<void>((resolve) => {
+			releasePreflight = resolve;
+		});
+		const { lineHandler, cleanup, getStreamCalls } = await startRpcMode({
+			withAuth: true,
+			responseDelayMs: 0,
+			preflightGate,
+		});
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+
+		try {
+			lineHandler(JSON.stringify({ id: "preflight-stop", type: "prompt", message: "must not run" }));
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			expect(getPromptResponses(rpcIo.outputLines, "preflight-stop")).toHaveLength(0);
+
+			process.emit("SIGUSR2");
+			releasePreflight();
+
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+			expect(getPromptResponses(rpcIo.outputLines, "preflight-stop")[0]).toMatchObject({
+				success: false,
+				error: "No new provider request after graceful stop",
+			});
+			expect(getStreamCalls()).toBe(0);
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("rejects a new RPC command after graceful stop and names the stop", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+
+		try {
+			process.emit("SIGUSR2");
+			lineHandler(JSON.stringify({ id: "late-state", type: "get_state" }));
+
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+			expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+				id: "late-state",
+				type: "response",
+				command: "get_state",
+				success: false,
+				error: "RPC session is stopping gracefully",
+			});
+		} finally {
+			exit.mockRestore();
 			await cleanup();
 		}
 	});

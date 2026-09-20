@@ -1440,6 +1440,11 @@ export class AgentSession {
 			return;
 		}
 
+		if (this.agent.noNewRequestsSignal.aborted) {
+			const error = new Error("No new provider request after graceful stop");
+			preflightResult?.(false);
+			throw error;
+		}
 		preflightResult?.(true);
 		await this._runAgentPrompt(messages);
 	}

@@ -110,6 +110,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let shutdownRequested = false;
 	let gracefulExitRequested = false;
 	let shuttingDown = false;
+	const pendingCommands = new Set<Promise<void>>();
 	const signalCleanupHandlers: Array<() => void> = [];
 
 	/** Helper for dialog methods with signal/timeout support */
@@ -398,9 +399,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			onGracefulStop: () => {
 				if (gracefulExitRequested) return;
 				gracefulExitRequested = true;
-				shutdownRequested = true;
 				session.agent.requestStopAfterTurn();
-				void session.waitForIdle().then(() => checkShutdownRequested());
+				void waitForGracefulShutdown();
 			},
 		}),
 	);
@@ -415,38 +415,39 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "prompt": {
-				if (gracefulExitRequested) return error(id, "prompt", "RPC session is stopping gracefully");
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
-				void session
-					.prompt(command.message, {
+				let responseWritten = false;
+				try {
+					await session.prompt(command.message, {
 						images: command.images,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",
 						preflightResult: (didSucceed) => {
 							if (didSucceed) {
 								preflightSucceeded = true;
+								responseWritten = true;
 								output(success(id, "prompt"));
 							}
 						},
-					})
-					.catch((e) => {
-						if (!preflightSucceeded) {
-							output(error(id, "prompt", e.message));
-						}
 					});
+				} catch (e) {
+					if (!preflightSucceeded && !responseWritten) {
+						responseWritten = true;
+						output(error(id, "prompt", e instanceof Error ? e.message : String(e)));
+					}
+				}
+				if (responseWritten) await waitForRawStdoutBackpressure();
 				return undefined;
 			}
 
 			case "steer": {
-				if (gracefulExitRequested) return error(id, "steer", "RPC session is stopping gracefully");
 				await session.steer(command.message, command.images, { source: "rpc" });
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				if (gracefulExitRequested) return error(id, "follow_up", "RPC session is stopping gracefully");
 				await session.followUp(command.message, command.images, { source: "rpc" });
 				return success(id, "follow_up");
 			}
@@ -559,7 +560,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "compact": {
-				if (gracefulExitRequested) return error(id, "compact", "RPC session is stopping gracefully");
 				const result = await session.compact(command.customInstructions);
 				return success(id, "compact", result);
 			}
@@ -771,8 +771,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		process.exit(exitCode);
 	}
 
+	async function waitForPendingCommands(): Promise<void> {
+		while (pendingCommands.size > 0) {
+			await Promise.allSettled([...pendingCommands]);
+		}
+	}
+
+	async function waitForGracefulShutdown(): Promise<void> {
+		// Let the signal handler's synchronous turn finish so commands already accepted
+		// in the same turn are included in the barrier.
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		await Promise.all([session.waitForIdle(), waitForPendingCommands()]);
+		await shutdown(0);
+	}
+
 	async function checkShutdownRequested(): Promise<void> {
-		if (!shutdownRequested) return;
+		if (!shutdownRequested || gracefulExitRequested) return;
 		await shutdown();
 	}
 
@@ -809,6 +823,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		const command = parsed as RpcCommand;
+		if (gracefulExitRequested) {
+			const rejected = command as { id?: string; type?: string };
+			output(error(rejected.id, rejected.type ?? "command", "RPC session is stopping gracefully"));
+			await waitForRawStdoutBackpressure();
+			return;
+		}
 		try {
 			const response = await handleCommand(command);
 			if (response) {
@@ -835,7 +855,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	detachInput = (() => {
 		const detachJsonl = attachJsonlLineReader(process.stdin, (line) => {
-			void handleInputLine(line);
+			const commandPromise = handleInputLine(line);
+			pendingCommands.add(commandPromise);
+			void commandPromise.then(
+				() => pendingCommands.delete(commandPromise),
+				() => pendingCommands.delete(commandPromise),
+			);
 		});
 		return () => {
 			detachJsonl();
