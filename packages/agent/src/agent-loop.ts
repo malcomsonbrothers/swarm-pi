@@ -370,7 +370,10 @@ async function streamAssistantResponse(
 
 	const llmContext = normalizeContext({ messages: llmMessages });
 
-	// Resolve API key (important for expiring tokens)
+	if (checkStopBeforeRequest && (await config.shouldStopBeforeNextTurn?.())) return undefined;
+	if (config.noNewRequests?.aborted) return undefined;
+
+	// Resolve API key (important for expiring tokens) only after the request gate.
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
 

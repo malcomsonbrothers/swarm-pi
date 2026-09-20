@@ -21,6 +21,8 @@ export interface AuthResolutionOverrides {
 	/** Require this much remaining OAuth-token validity; defaults to five minutes. */
 	minOAuthValidityMs?: number;
 	signal?: AbortSignal;
+	/** Prevents starting request authentication after a graceful stop. */
+	noNewRequests?: AbortSignal;
 }
 
 export class ModelsError extends Error {
@@ -69,6 +71,7 @@ async function resolveProviderAuthWithSignal(
 ): Promise<AuthResult | undefined> {
 	signal.throwIfAborted();
 	const requestAuthContext = overrides?.env ? overlayEnvAuthContext(authContext, overrides.env) : authContext;
+	overrides?.noNewRequests?.throwIfAborted();
 
 	if (overrides?.apiKey !== undefined && provider.auth.apiKey) {
 		return resolveApiKey(
@@ -85,6 +88,7 @@ async function resolveProviderAuthWithSignal(
 	}
 
 	const stored = await readCredential(credentials, provider.id, signal);
+	overrides?.noNewRequests?.throwIfAborted();
 	if (stored) {
 		if (stored.type === "oauth" && provider.auth.oauth) {
 			return resolveStoredOAuth(
@@ -94,6 +98,7 @@ async function resolveProviderAuthWithSignal(
 				stored,
 				signal,
 				overrides?.minOAuthValidityMs,
+				overrides?.noNewRequests,
 			);
 		}
 		if (stored.type === "api_key" && provider.auth.apiKey) {
@@ -130,13 +135,15 @@ async function resolveStoredOAuth(
 	oauth: OAuthAuth,
 	stored: OAuthCredential,
 	signal: AbortSignal,
-	minOAuthValidityMs?: number,
+	minOAuthValidityMs: number | undefined,
+	noNewRequests: AbortSignal | undefined,
 ): Promise<AuthResult | undefined> {
 	const minimumValidityMs = Math.max(DEFAULT_OAUTH_MINIMUM_VALIDITY_MS, minOAuthValidityMs ?? 0);
 	const expiresSoon = (credential: OAuthCredential) => Date.now() + minimumValidityMs >= credential.expires;
 	let credential = stored;
 
 	if (expiresSoon(credential)) {
+		noNewRequests?.throwIfAborted();
 		// Optimistic check said expired; the authoritative check runs under the lock.
 		let post: Credential | undefined;
 		try {
@@ -145,6 +152,7 @@ async function resolveStoredOAuth(
 				async (current) => {
 					if (current?.type !== "oauth") return undefined; // logged out meanwhile
 					if (!expiresSoon(current)) return undefined; // another process/request refreshed
+					noNewRequests?.throwIfAborted();
 					try {
 						const refreshSignal = AbortSignal.any([
 							signal,
@@ -171,6 +179,7 @@ async function resolveStoredOAuth(
 		}
 	}
 
+	noNewRequests?.throwIfAborted();
 	try {
 		return { auth: await oauth.toAuth(credential), source: "OAuth" };
 	} catch (error) {

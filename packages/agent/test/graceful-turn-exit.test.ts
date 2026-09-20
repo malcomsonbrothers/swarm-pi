@@ -88,7 +88,7 @@ function createStreamFn(state: { calls: number }): StreamFn {
 function createAgent(
 	streamFn: StreamFn,
 	tools: AgentTool<any>[],
-	options: Pick<AgentOptions, "shouldStopAfterTurn" | "prepareNextTurnWithContext"> = {},
+	options: Pick<AgentOptions, "getApiKey" | "shouldStopAfterTurn" | "prepareNextTurnWithContext"> = {},
 ): Agent {
 	return new Agent({
 		streamFn,
@@ -212,6 +212,27 @@ describe("requestStopAfterTurn", () => {
 		await secondAgent.prompt("stop during preparation");
 		expect(secondState.calls).toBe(1);
 		expect(secondPreparationCalls).toBe(1);
+	});
+
+	it("does not resolve credentials after the no-new-request gate closes", async () => {
+		const state = { calls: 0 };
+		let credentialCalls = 0;
+		let agent: Agent | undefined;
+		agent = createAgent(createStreamFn(state), [], {
+			getApiKey: async () => {
+				credentialCalls++;
+				return "test-key";
+			},
+			shouldStopAfterTurn: () => {
+				agent?.requestStopAfterTurn();
+				return false;
+			},
+		});
+
+		await agent.prompt("stop before credential resolution");
+
+		expect(state.calls).toBe(1);
+		expect(credentialCalls).toBe(1);
 	});
 
 	it("does not stop a turn when nothing asked it to", async () => {

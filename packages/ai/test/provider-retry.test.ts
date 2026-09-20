@@ -62,6 +62,32 @@ describe("provider request retries", () => {
 		expect(request).toHaveBeenCalledTimes(2);
 	});
 
+	it("does not begin a request when the no-new-request gate is closed", async () => {
+		const gate = new AbortController();
+		gate.abort();
+		const request = vi.fn<() => Promise<string>>().mockResolvedValue("unexpected");
+
+		await expect(retryProviderRequest(request, { maxRetries: 1, noNewRequests: gate.signal })).rejects.toMatchObject({
+			name: "AbortError",
+		});
+		expect(request).not.toHaveBeenCalled();
+	});
+
+	it("cancels provider retry backoff when the no-new-request gate closes", async () => {
+		vi.useFakeTimers();
+		const gate = new AbortController();
+		const request = vi.fn<() => Promise<string>>().mockRejectedValue(providerError(429, { "retry-after": "277403" }));
+
+		const result = retryProviderRequest(request, { maxRetries: 2, maxRetryDelayMs: 0, noNewRequests: gate.signal });
+		await vi.advanceTimersByTimeAsync(0);
+		expect(request).toHaveBeenCalledTimes(1);
+		gate.abort();
+
+		await expect(result).rejects.toMatchObject({ name: "AbortError" });
+		expect(request).toHaveBeenCalledTimes(1);
+		expect(vi.getTimerCount()).toBe(0);
+	});
+
 	it("aborts a provider-requested retry delay", async () => {
 		vi.useFakeTimers();
 		const controller = new AbortController();

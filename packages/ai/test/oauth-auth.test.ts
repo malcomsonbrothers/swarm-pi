@@ -145,6 +145,22 @@ describe("OAuth through Models.getAuth (lazy load chain)", () => {
 		expect(result?.source).toBe("OAuth");
 	});
 
+	it("does not refresh OAuth credentials after the no-new-request gate closes", async () => {
+		const credentials = new InMemoryCredentialStore();
+		await credentials.modify("anthropic", async () => ({
+			type: "oauth",
+			access: "expired-access",
+			refresh: "r",
+			expires: 0,
+		}));
+		const models = createModels({ credentials });
+		models.setProvider(anthropicProvider());
+		const gate = new AbortController();
+		gate.abort();
+
+		await expect(models.getAuth("anthropic", { noNewRequests: gate.signal })).rejects.toThrow();
+	});
+
 	it("resolves stored github-copilot oauth credentials including per-credential baseUrl", async () => {
 		const access = "tid=abc;exp=123;proxy-ep=proxy.business.githubcopilot.com;rest";
 		const credentials = new InMemoryCredentialStore();

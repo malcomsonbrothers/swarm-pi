@@ -657,7 +657,9 @@ class ModelsImpl implements MutableModels {
 			apiKey: options?.apiKey,
 			env: options?.env,
 			signal: options?.signal,
+			noNewRequests: options?.noNewRequests,
 		});
+		options?.noNewRequests?.throwIfAborted();
 		if (!resolution) {
 			throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 		}
@@ -667,6 +669,7 @@ class ModelsImpl implements MutableModels {
 		const apiKey = options?.apiKey ?? auth.apiKey;
 		let headers = mergeHeaders(auth.headers, options?.headers);
 		if (options?.transformHeaders) headers = await options.transformHeaders(headers ?? {});
+		options?.noNewRequests?.throwIfAborted();
 		const env = resolution.env || options?.env ? { ...(resolution.env ?? {}), ...(options?.env ?? {}) } : undefined;
 		const requestModel = auth.baseUrl ? { ...model, baseUrl: auth.baseUrl } : model;
 		const { transformHeaders: _transformHeaders, ...providerOptions } = options ?? {};
@@ -750,6 +753,7 @@ class ModelsImpl implements MutableModels {
 			throw new ModelsError("provider", `Provider ${model.provider} does not support deferred responses`);
 		}
 		const { requestModel, requestOptions } = await this.applyAuth(model, options);
+		options?.noNewRequests?.throwIfAborted();
 		await provider.cancelDeferred(requestModel, handle, requestOptions);
 	}
 }

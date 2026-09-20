@@ -87,6 +87,7 @@ export interface ModelRuntimeAuthOverrides extends AuthOperationOptions {
 	env?: Record<string, string>;
 	/** Require this much remaining OAuth-token validity; defaults to five minutes. */
 	minOAuthValidityMs?: number;
+	noNewRequests?: AbortSignal;
 }
 
 export type CredentialSynchronizationOperation = "login" | "logout" | "setRuntimeApiKey" | "removeRuntimeApiKey";
@@ -585,6 +586,7 @@ export class ModelRuntime implements Models {
 			apiKey: options?.apiKey,
 			env: options?.env,
 			signal: options?.signal,
+			noNewRequests: options?.noNewRequests,
 		});
 		if (!resolution) throw new ModelsError("auth", `Provider is not configured: ${model.provider}`);
 
@@ -592,6 +594,7 @@ export class ModelRuntime implements Models {
 		const providerOptions = rawProviderOptions as Omit<TOptions, "transformHeaders"> & ProviderRequestOptions;
 		let headers = mergeHeaders(resolution.auth.headers, providerOptions.headers);
 		if (transformHeaders) headers = await transformHeaders(headers ?? {});
+		options?.noNewRequests?.throwIfAborted();
 		const env =
 			resolution.env || providerOptions.env
 				? { ...(resolution.env ?? {}), ...(providerOptions.env ?? {}) }
