@@ -1,60 +1,56 @@
 #!/usr/bin/env node
 
-import { cpSync, lstatSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { cpSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
-const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/coding-agent");
-const defaultDistDir = join(packageDir, "dist");
-const backupName = ".current-pack-target";
+const defaultPackageDir = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/coding-agent");
 
-/** Materialize the current symlink because npm pack does not preserve symlinks. */
-export function prepareCodingAgentPackage(distDir = defaultDistDir) {
-	const current = join(distDir, "current");
-	const backup = join(distDir, backupName);
-	let currentStat;
-	try {
-		currentStat = lstatSync(current);
-	} catch (error) {
-		if (error?.code === "ENOENT") return false;
-		throw error;
-	}
-	if (!currentStat.isSymbolicLink()) return false;
-
-	rmSync(backup, { force: true, recursive: true });
-	const target = realpathSync(current);
-	renameSync(current, backup);
-	try {
-		cpSync(target, current, { recursive: true, dereference: true });
-	} catch (error) {
-		rmSync(current, { force: true, recursive: true });
-		renameSync(backup, current);
-		throw error;
-	}
-	return true;
+function isExcludedPackagePath(packageDir, source) {
+	const relativePath = relative(packageDir, source).replaceAll("\\", "/");
+	return (
+		relativePath === "node_modules" ||
+		relativePath.startsWith("node_modules/") ||
+		relativePath === "dist/bundles" ||
+		relativePath.startsWith("dist/bundles/")
+	);
 }
 
-/** Restore the stable current symlink after npm pack or npm publish. */
-export function restoreCodingAgentPackage(distDir = defaultDistDir) {
-	const current = join(distDir, "current");
-	const backup = join(distDir, backupName);
-	let backupStat;
+/**
+ * Copy the package into a temporary directory with dist/current dereferenced there.
+ * The live package directory, including its current symlink, is never modified.
+ */
+export function copyCodingAgentPackageForPack(packageDir = defaultPackageDir) {
+	const temporaryRoot = mkdtempSync(join(tmpdir(), "pi-coding-agent-pack-"));
+	const packageCopy = join(temporaryRoot, basename(packageDir));
 	try {
-		backupStat = lstatSync(backup);
+		const current = join(packageDir, "dist", "current");
+		const currentStat = lstatSync(current);
+		if (!currentStat.isSymbolicLink()) {
+			throw new Error(`${current} must be a symlink before packaging`);
+		}
+		cpSync(packageDir, packageCopy, {
+			recursive: true,
+			dereference: true,
+			filter: (source) => !isExcludedPackagePath(packageDir, source),
+		});
+		return packageCopy;
 	} catch (error) {
-		if (error?.code === "ENOENT") return false;
+		rmSync(temporaryRoot, { force: true, recursive: true });
 		throw error;
 	}
-	if (!backupStat.isSymbolicLink()) throw new Error(`${backup} is not the saved current symlink`);
+}
 
-	rmSync(current, { force: true, recursive: true });
-	renameSync(backup, current);
-	return true;
+/** Remove a temporary package copy returned by copyCodingAgentPackageForPack(). */
+export function removeCodingAgentPackageCopy(packageCopy) {
+	rmSync(dirname(packageCopy), { force: true, recursive: true });
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-	const action = process.argv[2];
-	if (action === "prepare") prepareCodingAgentPackage();
-	else if (action === "restore") restoreCodingAgentPackage();
-	else throw new Error("Usage: scripts/prepare-coding-agent-package.mjs <prepare|restore>");
+	const [action, packageDir] = process.argv.slice(2);
+	if (action !== "copy" || !packageDir) {
+		throw new Error("Usage: scripts/prepare-coding-agent-package.mjs copy <package-dir>");
+	}
+	console.log(copyCodingAgentPackageForPack(resolve(packageDir)));
 }

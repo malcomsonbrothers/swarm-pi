@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPublicWorkspacePackages } from "./release-packages.mjs";
-import { prepareCodingAgentPackage, restoreCodingAgentPackage } from "./prepare-coding-agent-package.mjs";
+import {
+	copyCodingAgentPackageForPack,
+	removeCodingAgentPackageCopy,
+} from "./prepare-coding-agent-package.mjs";
 
 const codingAgentName = "@earendil-works/pi-coding-agent";
 const developmentPackages = new Set(["pi-client", "pi-protocol", "pi-server"].map((name) => `@earendil-works/${name}`));
@@ -31,14 +34,15 @@ export function packReleasePackages(packages, tarballDirectory) {
 	for (const pkg of packages) {
 		const manifest = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (manifest.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const prepared = pkg.name === codingAgentName && prepareCodingAgentPackage();
+		const packageDirectory =
+			pkg.name === codingAgentName ? copyCodingAgentPackageForPack(pkg.directory) : pkg.directory;
 		let output;
 		try {
 			output = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], {
-				cwd: pkg.directory,
+				cwd: packageDirectory,
 			});
 		} finally {
-			if (prepared) restoreCodingAgentPackage();
+			if (packageDirectory !== pkg.directory) removeCodingAgentPackageCopy(packageDirectory);
 		}
 		// npm <11.6 returns an array; newer npm can return an object keyed by package name.
 		const parsed = JSON.parse(output);

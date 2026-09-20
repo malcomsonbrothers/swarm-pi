@@ -44,7 +44,7 @@ No existing field, behaviour or file is altered.
 
 ## Swarm build and rollback
 
-`npm run build:offline` builds a complete bundle in `packages/coding-agent/dist/bundles/.staging-<pid>`, renames it to a versioned directory, and atomically replaces the `packages/coding-agent/dist/current` symlink. The legacy `dist/bundle` directory is never moved or replaced; running daemons may continue using it. The publisher retains the newest three versioned bundles and does not delete any bundle younger than seven days. `npm pack` temporarily materializes `dist/current` because npm does not preserve package symlinks, then restores the stable symlink after packing; the package bin and RPC export still resolve through `dist/current`.
+`npm run build:offline` builds a complete bundle in `packages/coding-agent/dist/bundles/.staging-<pid>`, renames it to a versioned directory, and atomically replaces the `packages/coding-agent/dist/current` symlink. The legacy `dist/bundle` directory is never moved or replaced; running daemons may continue using it. The publisher retains the newest three versioned bundles and does not delete any bundle younger than seven days. Packaging copies the coding-agent package to a temporary directory and materializes `dist/current` only in that copy because npm does not preserve package symlinks. The live package keeps its stable symlink throughout; the package bin and RPC export still resolve through `dist/current`.
 
 The owner's orchestrator installs the launcher separately, also as one atomic symlink rename:
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,7 +7,10 @@ import { join } from "node:path";
 import test from "node:test";
 import { publishBundle } from "./bundle-swap.mjs";
 import { cleanCodingAgentDist } from "./clean-coding-agent-dist.mjs";
-import { prepareCodingAgentPackage, restoreCodingAgentPackage } from "./prepare-coding-agent-package.mjs";
+import {
+	copyCodingAgentPackageForPack,
+	removeCodingAgentPackageCopy,
+} from "./prepare-coding-agent-package.mjs";
 
 test("publishes current atomically without touching the legacy bundle directory", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-bundle-publish-"));
@@ -60,22 +64,60 @@ test("cleans generated output without touching the legacy bundle directory", asy
 	}
 });
 
-test("materializes current for npm pack and restores its symlink", async () => {
+test("packs a temporary copy while a second process sees a complete live symlink", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-bundle-pack-"));
+	let packageCopy;
+	let poller;
 	try {
-		const dist = join(root, "dist");
-		const bundles = join(dist, "bundles", "123-1");
-		const current = join(dist, "current");
+		const packageDir = join(root, "package");
+		const bundles = join(packageDir, "dist", "bundles", "123-1");
+		const current = join(packageDir, "dist", "current");
 		await mkdir(bundles, { recursive: true });
-		await writeFile(join(bundles, "cli.js"), "bundle launcher");
+		await writeFile(join(packageDir, "package.json"), JSON.stringify({ name: "test-package", files: ["dist"] }));
+		await writeFile(join(bundles, "cli.js"), "bundle launcher".repeat(1024 * 1024));
 		await symlink("bundles/123-1", current, "dir");
 
-		assert.equal(prepareCodingAgentPackage(dist), true);
-		assert.equal(lstatSync(current).isDirectory(), true);
-		assert.equal(await readFile(join(current, "cli.js"), "utf8"), "bundle launcher");
-		assert.equal(restoreCodingAgentPackage(dist), true);
+		const pollerScript = `
+			const fs = require("node:fs");
+			const path = require("node:path");
+			const current = process.argv[1];
+			let failed = false;
+			const check = () => {
+				try {
+					if (!fs.lstatSync(current).isSymbolicLink()) throw new Error("current is not a symlink");
+					if (!fs.statSync(path.join(fs.realpathSync(current), "cli.js")).isFile()) throw new Error("cli.js is missing");
+				} catch (error) {
+					failed = true;
+					process.stderr.write(error.message + "\\n");
+					process.exit(1);
+				}
+			};
+			check();
+			process.stdout.write("ready\\n");
+			setInterval(check, 1);
+			process.on("SIGTERM", () => process.exit(failed ? 1 : 0));
+		`;
+		poller = spawn(process.execPath, ["-e", pollerScript, current], { stdio: ["ignore", "pipe", "pipe"] });
+		await new Promise((resolve, reject) => {
+			poller.stdout.setEncoding("utf8");
+			poller.stdout.on("data", (data) => data.includes("ready") && resolve());
+			poller.once("error", reject);
+			poller.once("exit", (code) => reject(new Error(`poller exited before ready: ${code}`)));
+		});
+
+		packageCopy = copyCodingAgentPackageForPack(packageDir);
 		assert.equal(lstatSync(current).isSymbolicLink(), true);
+		assert.equal(lstatSync(join(packageCopy, "dist", "current")).isDirectory(), true);
+		assert.equal(await readFile(join(packageCopy, "dist", "current", "cli.js"), "utf8"), "bundle launcher".repeat(1024 * 1024));
 	} finally {
+		if (poller) {
+			if (poller.exitCode === null) {
+				poller.kill("SIGTERM");
+				await new Promise((resolve) => poller.once("exit", resolve));
+			}
+			assert.equal(poller.exitCode, 0);
+		}
+		if (packageCopy) removeCodingAgentPackageCopy(packageCopy);
 		await rm(root, { recursive: true, force: true });
 	}
 });

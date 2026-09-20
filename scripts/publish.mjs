@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { copyCodingAgentPackageForPack, removeCodingAgentPackageCopy } from "./prepare-coding-agent-package.mjs";
 import { getPublicWorkspacePackages } from "./release-packages.mjs";
 
 const packages = getPublicWorkspacePackages();
+const codingAgentName = "@earendil-works/pi-coding-agent";
 
 const dryRun = process.argv.includes("--dry-run");
 const unknownArgs = process.argv.slice(2).filter((arg) => arg !== "--dry-run");
@@ -42,9 +44,19 @@ function assertBuildOutputExists(directory) {
 }
 
 function validatePack(directory) {
-	const result = run("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], { capture: true, cwd: directory });
-	const packed = JSON.parse(result.stdout)[0];
-	console.log(`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`);
+	const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
+	const packageDirectory =
+		manifest.name === codingAgentName ? copyCodingAgentPackageForPack(directory) : directory;
+	try {
+		const result = run("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
+			capture: true,
+			cwd: packageDirectory,
+		});
+		const packed = JSON.parse(result.stdout)[0];
+		console.log(`  ${packed.filename}: ${packed.files.length} files, ${packed.size} bytes packed, ${packed.unpackedSize} bytes unpacked`);
+	} finally {
+		if (packageDirectory !== directory) removeCodingAgentPackageCopy(packageDirectory);
+	}
 }
 
 function isPublished(name, version) {
@@ -105,6 +117,14 @@ for (const pkg of packageStates) {
 		continue;
 	}
 
-	run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts"], { cwd: pkg.directory });
+	const packageDirectory =
+		pkg.name === codingAgentName ? copyCodingAgentPackageForPack(pkg.directory) : pkg.directory;
+	try {
+		run("npm", ["publish", "--access", "public", "--provenance", "--ignore-scripts"], {
+			cwd: packageDirectory,
+		});
+	} finally {
+		if (packageDirectory !== pkg.directory) removeCodingAgentPackageCopy(packageDirectory);
+	}
 	console.log();
 }
