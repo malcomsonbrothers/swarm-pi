@@ -8,7 +8,7 @@ patched behaviour, and can switch back to vanilla pi at any time.
 
 ## What the patch is
 
-Three source files change:
+This branch carries the original Codex accounting patch plus swarm-specific graceful-shutdown, packaging, launcher-validation, and documentation fixes. The original patch changes three source files:
 
 - `packages/ai/src/types.ts` — the `Usage` interface gains one optional member:
   `providerExtra?: Record<string, number>`.

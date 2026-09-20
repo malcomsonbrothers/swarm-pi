@@ -57,6 +57,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		for (const signal of signals) {
 			const handler = () => {
+				if (gracefulExitRequested) return;
 				killTrackedDetachedChildren();
 				void disposeRuntime().finally(() => {
 					process.exit(signal === "SIGHUP" ? 129 : 143);
