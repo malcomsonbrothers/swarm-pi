@@ -37,8 +37,12 @@ test("refuses a missing or non-executable current launcher", async () => {
 		await mkdir(join(root, "current"), { recursive: true });
 		await writeFile(currentCli, "not executable");
 
-		assert.throws(() => linkSwarmPi(target, currentCli), /EACCES|permission denied/i);
+		assert.throws(() => linkSwarmPi(target, currentCli), /regular executable file/i);
 		await rm(currentCli);
+		await mkdir(currentCli);
+		await chmod(currentCli, 0o755);
+		assert.throws(() => linkSwarmPi(target, currentCli), /regular executable file/i);
+		await rm(currentCli, { recursive: true });
 		assert.throws(() => linkSwarmPi(target, currentCli), /ENOENT|no such file/i);
 	} finally {
 		await rm(root, { recursive: true, force: true });

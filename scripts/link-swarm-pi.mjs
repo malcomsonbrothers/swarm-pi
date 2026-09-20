@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { accessSync, constants, lstatSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
+import { lstatSync, realpathSync, renameSync, rmSync, statSync, symlinkSync } from "node:fs";
 import { basename, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -16,7 +16,10 @@ const defaultCurrentCli = resolve(repoRoot, "packages/coding-agent/dist/current/
 export function linkSwarmPi(targetBinPath, currentCliPath = defaultCurrentCli) {
 	const target = resolve(targetBinPath);
 	const current = resolve(currentCliPath);
-	accessSync(current, constants.X_OK);
+	const currentStat = statSync(current);
+	if (!currentStat.isFile() || (currentStat.mode & 0o111) === 0) {
+		throw new Error(`${current} is not a regular executable file`);
+	}
 
 	const oldResolution = resolveExisting(target);
 	const temporary = resolve(dirname(target), `.${basename(target)}.swap-${process.pid}`);
