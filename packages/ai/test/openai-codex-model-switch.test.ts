@@ -67,7 +67,7 @@ describe("Codex to Codex model switch", () => {
 		const items = convertResponsesMessages(
 			model("gpt-5.6-luna", "codex-proxy"),
 			context(),
-			new Set(["openai-codex", "codex-proxy"]),
+			new Set(["openai-codex"]),
 			{ includeSystemPrompt: false },
 		) as unknown as Array<Record<string, unknown>>;
 		const kinds = items.map((item) => item.type ?? item.role);

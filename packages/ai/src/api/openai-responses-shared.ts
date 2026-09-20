@@ -43,7 +43,7 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
-import { keepsCodexReasoning, transformMessages } from "./transform-messages.ts";
+import { isCodexResponsesApi, keepsCodexReasoning, transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
 // Utilities
@@ -161,7 +161,7 @@ export function convertResponsesMessages<TApi extends Api>(
 	};
 
 	const normalizeToolCallId = (id: string, _targetModel: Model<TApi>, source: AssistantMessage): string => {
-		if (!allowedToolCallProviders.has(model.provider)) return normalizeIdPart(id);
+		if (!isCodexResponsesApi(model.api) && !allowedToolCallProviders.has(model.provider)) return normalizeIdPart(id);
 		if (!id.includes("|")) return normalizeIdPart(id);
 		const [callId, itemId] = id.split("|");
 		const normalizedCallId = normalizeIdPart(callId);

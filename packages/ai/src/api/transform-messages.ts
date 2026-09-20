@@ -64,7 +64,9 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
  */
-const CODEX_RESPONSES_API = "openai-codex-responses";
+export function isCodexResponsesApi(api: Api): boolean {
+	return api === "openai-codex-responses";
+}
 
 type ProcessWithBuiltinModule = typeof process & {
 	getBuiltinModule?: {
@@ -91,7 +93,7 @@ function codexCrossModelSwitchIsEnabled(): boolean {
  * ~/.pi/agent/codex-cross-model-off turns this off without a rebuild.
  */
 export function keepsCodexReasoning(source: Pick<AssistantMessage, "api" | "model">, model: Model<Api>): boolean {
-	if (source.api !== CODEX_RESPONSES_API || model.api !== CODEX_RESPONSES_API) return false;
+	if (!isCodexResponsesApi(source.api) || !isCodexResponsesApi(model.api)) return false;
 	if (source.model === model.id) return false;
 	return codexCrossModelSwitchIsEnabled();
 }
