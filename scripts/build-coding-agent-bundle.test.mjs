@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { publishBundle } from "./bundle-swap.mjs";
+import { cleanCodingAgentDist } from "./clean-coding-agent-dist.mjs";
+import { prepareCodingAgentPackage, restoreCodingAgentPackage } from "./prepare-coding-agent-package.mjs";
 
 test("publishes current atomically without touching the legacy bundle directory", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-bundle-publish-"));
@@ -32,6 +34,47 @@ test("publishes current atomically without touching the legacy bundle directory"
 		assert.equal(await readFile(join(current, "chunks", "mode.js"), "utf8"), "new mode");
 		assert.equal(await readFile(join(oldBundle, "cli.js"), "utf8"), "old launcher");
 		assert.equal(await readFile(join(legacyBundle, "cli.js"), "utf8"), "legacy launcher");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("cleans generated output without touching the legacy bundle directory", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bundle-clean-"));
+	try {
+		const dist = join(root, "dist");
+		const legacyBundle = join(dist, "bundle");
+		await mkdir(join(legacyBundle, "chunks"), { recursive: true });
+		await writeFile(join(legacyBundle, "cli.js"), "legacy launcher");
+		await mkdir(join(dist, "bundles", "123-1"), { recursive: true });
+		await writeFile(join(dist, "index.js"), "generated output");
+
+		cleanCodingAgentDist(dist);
+
+		assert.equal(lstatSync(legacyBundle).isDirectory(), true);
+		assert.equal(await readFile(join(legacyBundle, "cli.js"), "utf8"), "legacy launcher");
+		assert.equal(lstatSync(join(dist, "bundles"), { throwIfNoEntry: false }), undefined);
+		assert.equal(lstatSync(join(dist, "index.js"), { throwIfNoEntry: false }), undefined);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("materializes current for npm pack and restores its symlink", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bundle-pack-"));
+	try {
+		const dist = join(root, "dist");
+		const bundles = join(dist, "bundles", "123-1");
+		const current = join(dist, "current");
+		await mkdir(bundles, { recursive: true });
+		await writeFile(join(bundles, "cli.js"), "bundle launcher");
+		await symlink("bundles/123-1", current, "dir");
+
+		assert.equal(prepareCodingAgentPackage(dist), true);
+		assert.equal(lstatSync(current).isDirectory(), true);
+		assert.equal(await readFile(join(current, "cli.js"), "utf8"), "bundle launcher");
+		assert.equal(restoreCodingAgentPackage(dist), true);
+		assert.equal(lstatSync(current).isSymbolicLink(), true);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

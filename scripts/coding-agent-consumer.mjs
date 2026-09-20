@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getPublicWorkspacePackages } from "./release-packages.mjs";
+import { prepareCodingAgentPackage, restoreCodingAgentPackage } from "./prepare-coding-agent-package.mjs";
 
 const codingAgentName = "@earendil-works/pi-coding-agent";
 const developmentPackages = new Set(["pi-client", "pi-protocol", "pi-server"].map((name) => `@earendil-works/${name}`));
@@ -30,7 +31,15 @@ export function packReleasePackages(packages, tarballDirectory) {
 	for (const pkg of packages) {
 		const manifest = JSON.parse(readFileSync(join(pkg.directory, "package.json"), "utf8"));
 		if (manifest.name !== pkg.name) throw new Error(`Unexpected package name in ${pkg.directory}`);
-		const output = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], { cwd: pkg.directory });
+		const prepared = pkg.name === codingAgentName && prepareCodingAgentPackage();
+		let output;
+		try {
+			output = run("npm", ["pack", "--ignore-scripts", "--json", "--pack-destination", tarballDirectory], {
+				cwd: pkg.directory,
+			});
+		} finally {
+			if (prepared) restoreCodingAgentPackage();
+		}
 		// npm <11.6 returns an array; newer npm can return an object keyed by package name.
 		const parsed = JSON.parse(output);
 		const packed = Array.isArray(parsed) ? parsed[0] : Object.values(parsed)[0];
@@ -79,7 +88,7 @@ export function smokeTestCodingAgentConsumer(directory, runtime = process.execPa
 	checkInstalledPackages(join(directory, "node_modules"));
 	const packageDir = join(directory, "node_modules", codingAgentName);
 	const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
-	for (const path of ["dist/client", "dist/experimental", "dist/cli/experimental", "dist/bundle/client.js", "dist/bundle/coordinator.js"]) {
+	for (const path of ["dist/client", "dist/experimental", "dist/cli/experimental", "dist/current/client.js", "dist/current/coordinator.js"]) {
 		if (existsSync(join(packageDir, path))) throw new Error(`Published package contains development-only code: ${path}`);
 	}
 	const home = mkdtempSync(join(directory, "smoke-home-"));

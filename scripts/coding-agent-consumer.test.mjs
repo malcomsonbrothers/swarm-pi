@@ -23,11 +23,12 @@ function createFixture(t, { importServer = false, declareServer = false } = {}) 
 			type: "module",
 			exports: isAgent ? {
 				".": "./dist/index.js",
+				"./rpc-entry": { import: "./dist/current/rpc-entry.js" },
 				"./client": { source: "./src/client/index.ts" },
 				"./experimental/plugin": { source: "./src/experimental/plugin.ts" },
 			} : "./dist/index.js",
 			...(isAgent ? {
-				bin: { pi: "dist/bundle/cli.js" },
+				bin: { pi: "dist/current/cli.js" },
 				dependencies: {
 					"@earendil-works/chord": "1.0.0",
 					...(declareServer ? { "@earendil-works/pi-server": "1.0.0" } : {}),
@@ -47,7 +48,8 @@ export class ModelRuntime { static create() {} }
 ` : 'export const marker = "local tarball";',
 			...(isAgent ? {
 				"dist/cli.js": 'console.log("1.0.0");',
-				"dist/bundle/cli.js": 'console.log("1.0.0");',
+				"dist/current/cli.js": 'console.log("1.0.0");',
+				"dist/current/rpc-entry.js": 'console.log("rpc");',
 			} : {}),
 		};
 		for (const [path, content] of Object.entries(files)) {

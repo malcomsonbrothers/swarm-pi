@@ -9,7 +9,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "..");
 const packageDir = join(repoRoot, "packages", "coding-agent");
 const distCliPath = join(packageDir, "dist", "cli.js");
-const bundledDistCliPath = join(packageDir, "dist", "bundle", "cli.js");
+const bundledDistCliPath = join(packageDir, "dist", "current", "cli.js");
 const srcCliPath = join(packageDir, "src", "cli.ts");
 const defaultNodeProfileDir = join(repoRoot, "profiles-node");
 const defaultBunProfileDir = join(repoRoot, "profiles-bun");
@@ -591,7 +591,7 @@ async function main() {
 		!options.bundle &&
 		!options.build &&
 		existsSync(distCliPath) &&
-		readFileSync(distCliPath, "utf8").includes('import "./bundle/cli.js";')
+		readFileSync(distCliPath, "utf8").includes('import "./current/cli.js";')
 	) {
 		throw new Error("dist/cli.js is a bundled facade; rerun without --skip-build for an unbundled profile");
 	}
