@@ -1213,11 +1213,14 @@ export class AgentSession {
 	// Prompting
 	// =========================================================================
 
-	private async _runAgentPrompt(messages: AgentMessage | AgentMessage[]): Promise<void> {
+	private async _runAgentPrompt(
+		messages: AgentMessage | AgentMessage[],
+		options?: { allowAfterGracefulStop?: boolean },
+	): Promise<void> {
 		this._agentRunAbortRequested = false;
 		this._isAgentRunActive = true;
 		try {
-			await this.agent.prompt(messages);
+			await this.agent.prompt(messages, options);
 			while (await this._handlePostAgentRun()) {
 				if (this._agentRunAbortRequested || this.agent.noNewRequestsSignal.aborted) break;
 				await this.agent.continue();
@@ -1452,7 +1455,10 @@ export class AgentSession {
 			throw error;
 		}
 		preflightResult?.(true);
-		await this._runAgentPrompt(messages);
+		// The prompt was accepted before the graceful-stop gate closed. Keep the
+		// active turn's provider gate open; Agent.requestStopAfterTurn still prevents
+		// any continuation after this turn.
+		await this._runAgentPrompt(messages, { allowAfterGracefulStop: true });
 	}
 
 	/**

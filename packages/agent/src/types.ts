@@ -257,6 +257,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Return [] when no steering messages are available.
 	 */
 	getSteeringMessages?: () => Promise<AgentMessage[]>;
+	/** Restore steering messages when a stop arrives after queue polling but before a request. */
+	requeueSteeringMessages?: (messages: AgentMessage[]) => void;
 
 	/**
 	 * Returns follow-up messages to process after the agent would otherwise stop.
@@ -270,6 +272,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Contract: must not throw or reject. Return [] when no follow-up messages are available.
 	 */
 	getFollowUpMessages?: () => Promise<AgentMessage[]>;
+	/** Restore follow-up messages when a stop arrives after queue polling but before a request. */
+	requeueFollowUpMessages?: (messages: AgentMessage[]) => void;
 
 	/**
 	 * Tool execution mode.

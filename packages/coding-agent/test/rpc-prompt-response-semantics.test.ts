@@ -22,6 +22,7 @@ import { createTestExtensionsResult, createTestResourceLoader } from "./utilitie
 const rpcIo = vi.hoisted(() => ({
 	outputLines: [] as string[],
 	lineHandler: undefined as ((line: string) => void) | undefined,
+	onWrite: undefined as ((line: string) => void) | undefined,
 }));
 
 vi.mock("../src/core/output-guard.js", () => ({
@@ -30,6 +31,7 @@ vi.mock("../src/core/output-guard.js", () => ({
 	waitForRawStdoutBackpressure: vi.fn(async () => {}),
 	writeRawStdout: (line: string) => {
 		rpcIo.outputLines.push(line);
+		rpcIo.onWrite?.(line);
 	},
 }));
 
@@ -224,6 +226,7 @@ describe("RPC prompt response semantics", () => {
 	afterEach(() => {
 		rpcIo.outputLines = [];
 		rpcIo.lineHandler = undefined;
+		rpcIo.onWrite = undefined;
 	});
 
 	it("emits one failure response when prompt preflight rejects", async () => {
@@ -282,6 +285,32 @@ describe("RPC prompt response semantics", () => {
 				});
 			});
 		} finally {
+			await cleanup();
+		}
+	});
+
+	it("runs a prompt acknowledged before graceful stop", async () => {
+		const { lineHandler, cleanup, getStreamCalls } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+		let sentStop = false;
+		rpcIo.onWrite = (line) => {
+			if (!sentStop && line.includes('"id":"accepted-before-stop"') && line.includes('"success":true')) {
+				sentStop = true;
+				process.emit("SIGUSR2");
+			}
+		};
+
+		try {
+			lineHandler(JSON.stringify({ id: "accepted-before-stop", type: "prompt", message: "Run this" }));
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+			expect(getStreamCalls()).toBe(1);
+			expect(getPromptResponses(rpcIo.outputLines, "accepted-before-stop")).toHaveLength(1);
+		} finally {
+			exit.mockRestore();
 			await cleanup();
 		}
 	});
@@ -390,6 +419,55 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("reports acknowledged queued prompts, steering, and follow-ups that graceful stop cannot deliver", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 1000 });
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+
+		try {
+			lineHandler(JSON.stringify({ id: "undelivered-start", type: "prompt", message: "Start" }));
+			await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "undelivered-start")).toHaveLength(1));
+			lineHandler(
+				JSON.stringify({
+					id: "undelivered-prompt",
+					type: "prompt",
+					message: "Queued prompt",
+					streamingBehavior: "steer",
+				}),
+			);
+			lineHandler(JSON.stringify({ id: "undelivered-steer", type: "steer", message: "Queued steer" }));
+			lineHandler(JSON.stringify({ id: "undelivered-follow-up", type: "follow_up", message: "Queued follow-up" }));
+			await vi.waitFor(() => {
+				for (const id of ["undelivered-prompt", "undelivered-steer", "undelivered-follow-up"]) {
+					expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(
+						expect.objectContaining({ id, type: "response", success: true }),
+					);
+				}
+			});
+
+			process.emit("SIGUSR2");
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+			for (const [id, command] of [
+				["undelivered-prompt", "prompt"],
+				["undelivered-steer", "steer"],
+				["undelivered-follow-up", "follow_up"],
+			] as const) {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+					type: "command_not_delivered",
+					id,
+					command,
+					error: "RPC session stopped gracefully before command was delivered",
+				});
+			}
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
 	it("rejects a new RPC command after graceful stop and names the stop", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
 		const exitCodes: number[] = [];
@@ -410,6 +488,26 @@ describe("RPC prompt response semantics", () => {
 				success: false,
 				error: "RPC session is stopping gracefully",
 			});
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("preserves graceful exit code when SIGTERM arrives during graceful shutdown", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 25 });
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+
+		try {
+			lineHandler(JSON.stringify({ id: "sigterm-during-graceful", type: "prompt", message: "Start" }));
+			await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "sigterm-during-graceful")).toHaveLength(1));
+			process.emit("SIGUSR2");
+			process.emit("SIGTERM");
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
 		} finally {
 			exit.mockRestore();
 			await cleanup();

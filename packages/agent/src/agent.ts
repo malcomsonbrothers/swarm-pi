@@ -168,6 +168,10 @@ class PendingMessageQueue {
 		return [first];
 	}
 
+	prepend(messages: AgentMessage[]): void {
+		if (messages.length > 0) this.messages = [...messages, ...this.messages];
+	}
+
 	clear(): void {
 		this.messages = [];
 	}
@@ -178,6 +182,11 @@ type ActiveRun = {
 	resolve: () => void;
 	abortController: AbortController;
 };
+
+/** Options for a prompt already accepted before a graceful stop request. */
+export interface AgentPromptOptions {
+	allowAfterGracefulStop?: boolean;
+}
 
 /**
  * Stateful wrapper around the low-level agent loop.
@@ -397,21 +406,34 @@ export class Agent {
 	}
 
 	/** Start a new prompt from text, a single message, or a batch of messages. */
-	async prompt(message: AgentMessage | AgentMessage[]): Promise<void>;
-	async prompt(input: string, images?: ImageContent[]): Promise<void>;
-	async prompt(input: string | AgentMessage | AgentMessage[], images?: ImageContent[]): Promise<void> {
+	async prompt(message: AgentMessage | AgentMessage[], options?: AgentPromptOptions): Promise<void>;
+	async prompt(input: string, images?: ImageContent[], options?: AgentPromptOptions): Promise<void>;
+	async prompt(
+		input: string | AgentMessage | AgentMessage[],
+		imagesOrOptions?: ImageContent[] | AgentPromptOptions,
+		options?: AgentPromptOptions,
+	): Promise<void> {
 		if (this.activeRun) {
 			throw new Error(
 				"Agent is already processing a prompt. Use steer() or followUp() to queue messages, or wait for completion.",
 			);
 		}
+		const promptOptions = Array.isArray(input) ? (imagesOrOptions as AgentPromptOptions | undefined) : options;
+		const images = typeof input === "string" && Array.isArray(imagesOrOptions) ? imagesOrOptions : undefined;
+		const allowAfterGracefulStop = promptOptions?.allowAfterGracefulStop === true;
 		// A stop requested while idle applies to the next turn, not to a later
-		// independent prompt. Continuations never reopen this gate.
-		if (this._stopAfterTurnRequested && this._noNewRequestsController.signal.aborted) {
+		// independent prompt. A prompt accepted before the stop is the exception:
+		// it keeps the stop-after-turn request but uses an open provider gate for
+		// this one turn.
+		if (
+			!allowAfterGracefulStop &&
+			this._stopAfterTurnRequested &&
+			this._noNewRequestsController.signal.aborted
+		) {
 			this._noNewRequestsController = new AbortController();
 		}
 		const messages = this.normalizePromptInput(input, images);
-		await this.runPromptMessages(messages);
+		await this.runPromptMessages(messages, { allowAfterGracefulStop });
 	}
 
 	/** Continue from the current transcript. The last message must be a user or tool-result message. */
@@ -465,13 +487,14 @@ export class Agent {
 
 	private async runPromptMessages(
 		messages: AgentMessage[],
-		options: { skipInitialSteeringPoll?: boolean } = {},
+		options: { skipInitialSteeringPoll?: boolean; allowAfterGracefulStop?: boolean } = {},
 	): Promise<void> {
+		const runRequestGate = new AbortController();
 		await this.runWithLifecycle(async (signal) => {
 			await runAgentLoop(
 				messages,
 				this.createContextSnapshot(),
-				this.createLoopConfig(options),
+				this.createLoopConfig({ ...options, noNewRequests: runRequestGate.signal }),
 				(event) => this.processEvents(event),
 				signal,
 				this.streamFunction,
@@ -498,9 +521,16 @@ export class Agent {
 		};
 	}
 
-	private createLoopConfig(options: { skipInitialSteeringPoll?: boolean } = {}): AgentLoopConfig {
+	private createLoopConfig(
+		options: {
+			skipInitialSteeringPoll?: boolean;
+			allowAfterGracefulStop?: boolean;
+			noNewRequests?: AbortSignal;
+		} = {},
+	): AgentLoopConfig {
 		let skipInitialSteeringPoll = options.skipInitialSteeringPoll === true;
 		const shouldStopAfterTurn = this.shouldStopAfterTurn;
+		const noNewRequests = options.noNewRequests ?? this._noNewRequestsController.signal;
 		return {
 			model: this._state.model,
 			reasoning: this._state.thinkingLevel === "off" ? undefined : this._state.thinkingLevel,
@@ -510,7 +540,9 @@ export class Agent {
 			transport: this.transport,
 			thinkingBudgets: this.thinkingBudgets,
 			maxRetryDelayMs: this.maxRetryDelayMs,
-			noNewRequests: this._noNewRequestsController.signal,
+			noNewRequests,
+			requeueSteeringMessages: (messages) => this.steeringQueue.prepend(messages),
+			requeueFollowUpMessages: (messages) => this.followUpQueue.prepend(messages),
 			toolExecution: this.toolExecution,
 			beforeToolCall: this.beforeToolCall,
 			afterToolCall: this.afterToolCall,

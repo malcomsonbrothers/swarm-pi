@@ -31,6 +31,7 @@ import { toJsonEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
+	RpcCommandNotDeliveredEvent,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -41,6 +42,7 @@ import type {
 // Re-export types for consumers
 export type {
 	RpcCommand,
+	RpcCommandNotDeliveredEvent,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcResponse,
@@ -111,7 +113,87 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	let gracefulExitRequested = false;
 	let shuttingDown = false;
 	const pendingCommands = new Set<Promise<void>>();
+	type PendingRpcDelivery = {
+		id: string | undefined;
+		command: "prompt" | "steer" | "follow_up";
+		lane: "steering" | "followUp";
+		message: string | undefined;
+		acknowledged: boolean;
+		queued: boolean;
+	};
+	const pendingRpcDeliveries: PendingRpcDelivery[] = [];
+	let queueSnapshot: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
 	const signalCleanupHandlers: Array<() => void> = [];
+
+	const queueForLane = (lane: PendingRpcDelivery["lane"]): string[] =>
+		lane === "steering" ? queueSnapshot.steering : queueSnapshot.followUp;
+
+	const addPendingRpcDelivery = (
+		id: string | undefined,
+		command: PendingRpcDelivery["command"],
+		lane: PendingRpcDelivery["lane"],
+	): PendingRpcDelivery => {
+		const delivery: PendingRpcDelivery = {
+			id,
+			command,
+			lane,
+			message: undefined,
+			acknowledged: false,
+			queued: false,
+		};
+		pendingRpcDeliveries.push(delivery);
+		return delivery;
+	};
+
+	const removePendingRpcDelivery = (delivery: PendingRpcDelivery): void => {
+		const index = pendingRpcDeliveries.indexOf(delivery);
+		if (index !== -1) pendingRpcDeliveries.splice(index, 1);
+	};
+
+	const updateQueueSnapshot = (next: { steering: readonly string[]; followUp: readonly string[] }): void => {
+		const previous = queueSnapshot;
+		queueSnapshot = { steering: [...next.steering], followUp: [...next.followUp] };
+		for (const lane of ["steering", "followUp"] as const) {
+			const available = [...queueForLane(lane)];
+			const previousMessages = lane === "steering" ? previous.steering : previous.followUp;
+			for (const message of previousMessages) {
+				const index = available.indexOf(message);
+				if (index !== -1) available.splice(index, 1);
+			}
+			const candidates = pendingRpcDeliveries.filter((delivery) => delivery.lane === lane && !delivery.queued);
+			for (const message of available) {
+				const delivery = candidates.shift();
+				if (!delivery) break;
+				delivery.message = message;
+				delivery.queued = true;
+			}
+		}
+		for (const delivery of [...pendingRpcDeliveries]) {
+			if (!delivery.acknowledged || !delivery.queued || delivery.message === undefined) continue;
+			if (!queueForLane(delivery.lane).includes(delivery.message)) removePendingRpcDelivery(delivery);
+		}
+	};
+
+	const acknowledgeRpcDelivery = (delivery: PendingRpcDelivery): void => {
+		delivery.acknowledged = true;
+		if (!delivery.queued) removePendingRpcDelivery(delivery);
+		else updateQueueSnapshot(queueSnapshot);
+	};
+
+	const notDeliveredAfterGracefulStop = (): RpcCommandNotDeliveredEvent[] => {
+		const events: RpcCommandNotDeliveredEvent[] = [];
+		for (const delivery of pendingRpcDeliveries) {
+			if (!delivery.acknowledged || !delivery.queued || delivery.message === undefined) continue;
+			if (!queueForLane(delivery.lane).includes(delivery.message)) continue;
+			events.push({
+				type: "command_not_delivered",
+				id: delivery.id,
+				command: delivery.command,
+				error: "RPC session stopped gracefully before command was delivered",
+			});
+		}
+		return events;
+	};
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -378,7 +460,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
+		queueSnapshot = {
+			steering: [...session.getSteeringMessages()],
+			followUp: [...session.getFollowUpMessages()],
+		};
 		unsubscribe = session.subscribe((event) => {
+			if (event.type === "queue_update") updateQueueSnapshot(event);
 			output(toJsonEvent(event));
 			if (event.type === "agent_settled") {
 				void checkShutdownRequested();
@@ -393,6 +480,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	signalCleanupHandlers.push(
 		registerRpcSignalHandlers({
 			onShutdown: (exitCode, signal) => {
+				// A hard signal during graceful shutdown must not cut short the active
+				// turn or replace the completing graceful exit code.
+				if (gracefulExitRequested) {
+					shutdownRequested = true;
+					return;
+				}
 				killTrackedDetachedChildren();
 				void shutdown(exitCode, signal);
 			},
@@ -417,6 +510,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "prompt": {
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
+				const queuedDelivery =
+					session.isStreaming && command.streamingBehavior
+						? addPendingRpcDelivery(
+								id,
+								"prompt",
+								command.streamingBehavior === "steer" ? "steering" : "followUp",
+							)
+						: undefined;
 				let preflightSucceeded = false;
 				let responseWritten = false;
 				try {
@@ -428,28 +529,45 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 							if (didSucceed) {
 								preflightSucceeded = true;
 								responseWritten = true;
+								if (queuedDelivery) acknowledgeRpcDelivery(queuedDelivery);
 								output(success(id, "prompt"));
 							}
 						},
 					});
 				} catch (e) {
+					if (queuedDelivery) removePendingRpcDelivery(queuedDelivery);
 					if (!preflightSucceeded && !responseWritten) {
 						responseWritten = true;
 						output(error(id, "prompt", e instanceof Error ? e.message : String(e)));
 					}
 				}
+				if (queuedDelivery && !preflightSucceeded) removePendingRpcDelivery(queuedDelivery);
 				if (responseWritten) await waitForRawStdoutBackpressure();
 				return undefined;
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images, { source: "rpc" });
-				return success(id, "steer");
+				const queuedDelivery = addPendingRpcDelivery(id, "steer", "steering");
+			try {
+					await session.steer(command.message, command.images, { source: "rpc" });
+					acknowledgeRpcDelivery(queuedDelivery);
+					return success(id, "steer");
+				} catch (commandError) {
+					removePendingRpcDelivery(queuedDelivery);
+					throw commandError;
+				}
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images, { source: "rpc" });
-				return success(id, "follow_up");
+				const queuedDelivery = addPendingRpcDelivery(id, "follow_up", "followUp");
+			try {
+					await session.followUp(command.message, command.images, { source: "rpc" });
+					acknowledgeRpcDelivery(queuedDelivery);
+					return success(id, "follow_up");
+				} catch (commandError) {
+					removePendingRpcDelivery(queuedDelivery);
+					throw commandError;
+				}
 			}
 
 			case "abort": {
@@ -752,10 +870,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	 */
 	let detachInput = () => {};
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
-		if (shuttingDown) {
-			process.exit(exitCode);
-		}
+	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
+		if (shuttingDown) return;
 		shuttingDown = true;
 		for (const cleanup of signalCleanupHandlers) {
 			cleanup();
@@ -782,6 +898,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		// in the same turn are included in the barrier.
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		await Promise.all([session.waitForIdle(), waitForPendingCommands()]);
+		const notDelivered = notDeliveredAfterGracefulStop();
+		session.clearQueue();
+		for (const event of notDelivered) output(event);
+		if (notDelivered.length > 0) await waitForRawStdoutBackpressure();
 		await shutdown(0);
 	}
 

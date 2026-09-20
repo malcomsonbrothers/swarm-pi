@@ -239,6 +239,18 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: string; success: false; error: string };
 
 // ============================================================================
+// RPC Events (stdout)
+// ============================================================================
+
+/** Emitted after graceful shutdown for an acknowledged command that never ran. */
+export interface RpcCommandNotDeliveredEvent {
+	type: "command_not_delivered";
+	id?: string;
+	command: "prompt" | "steer" | "follow_up";
+	error: "RPC session stopped gracefully before command was delivered";
+}
+
+// ============================================================================
 // Extension UI Events (stdout)
 // ============================================================================
 

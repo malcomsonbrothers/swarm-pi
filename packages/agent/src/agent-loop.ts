@@ -209,6 +209,15 @@ async function runLoop(
 				await emit({ type: "turn_start" });
 			}
 
+			// A stop can arrive after queue polling but before the provider request. Put
+			// the messages back so the caller can report them as not delivered instead
+			// of silently consuming them.
+			if (lastCompletedTurn && (await config.shouldStopBeforeNextTurn?.())) {
+				config.requeueSteeringMessages?.(pendingMessages);
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
+
 			// Process prepared and queued messages before the next assistant response.
 			for (const message of declareToolChanges(currentContext, [...preparedMessages, ...pendingMessages])) {
 				await emit({ type: "message_start", message });
@@ -281,6 +290,10 @@ async function runLoop(
 		// Agent would stop here. Check for follow-up messages.
 		const followUpMessages = (await config.getFollowUpMessages?.()) || [];
 		if (followUpMessages.length > 0) {
+			if (await config.shouldStopBeforeNextTurn?.()) {
+				config.requeueFollowUpMessages?.(followUpMessages);
+				break;
+			}
 			// Set as pending so inner loop processes them
 			pendingMessages = followUpMessages;
 			continue;
