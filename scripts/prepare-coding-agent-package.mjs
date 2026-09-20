@@ -1,11 +1,23 @@
 #!/usr/bin/env node
 
-import { cpSync, lstatSync, mkdtempSync, rmSync } from "node:fs";
+import { accessSync, constants, cpSync, lstatSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const defaultPackageDir = resolve(dirname(fileURLToPath(import.meta.url)), "../packages/coding-agent");
+const releaseBuildCommand = 'Run "npm run build:offline" before packing or publishing.';
+
+/** Verify that a direct npm pack/publish has a usable executable behind dist/current/cli.js. */
+export function assertCodingAgentPackageExecutable(packageDir = defaultPackageDir) {
+	const cliPath = join(packageDir, "dist", "current", "cli.js");
+	try {
+		if (!statSync(cliPath).isFile()) throw new Error("not a regular file");
+		accessSync(cliPath, constants.X_OK);
+	} catch {
+		throw new Error(`${cliPath} is not a regular executable file. ${releaseBuildCommand}`);
+	}
+}
 
 function isExcludedPackagePath(packageDir, source) {
 	const relativePath = relative(packageDir, source).replaceAll("\\", "/");
@@ -49,8 +61,13 @@ export function removeCodingAgentPackageCopy(packageCopy) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
 	const [action, packageDir] = process.argv.slice(2);
-	if (action !== "copy" || !packageDir) {
-		throw new Error("Usage: scripts/prepare-coding-agent-package.mjs copy <package-dir>");
+	if (!packageDir || !["copy", "verify"].includes(action)) {
+		throw new Error("Usage: scripts/prepare-coding-agent-package.mjs <copy|verify> <package-dir>");
 	}
-	console.log(copyCodingAgentPackageForPack(resolve(packageDir)));
+	const resolvedPackageDir = resolve(packageDir);
+	if (action === "verify") {
+		assertCodingAgentPackageExecutable(resolvedPackageDir);
+	} else {
+		console.log(copyCodingAgentPackageForPack(resolvedPackageDir));
+	}
 }

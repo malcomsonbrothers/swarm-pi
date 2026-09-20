@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +8,7 @@ import test from "node:test";
 import { publishBundle } from "./bundle-swap.mjs";
 import { cleanCodingAgentDist } from "./clean-coding-agent-dist.mjs";
 import {
+	assertCodingAgentPackageExecutable,
 	copyCodingAgentPackageForPack,
 	removeCodingAgentPackageCopy,
 } from "./prepare-coding-agent-package.mjs";
@@ -59,6 +60,31 @@ test("cleans generated output without touching the legacy bundle directory", asy
 		assert.equal(await readFile(join(legacyBundle, "cli.js"), "utf8"), "legacy launcher");
 		assert.equal(lstatSync(join(dist, "bundles"), { throwIfNoEntry: false }), undefined);
 		assert.equal(lstatSync(join(dist, "index.js"), { throwIfNoEntry: false }), undefined);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("guards direct npm packing and publishing with an executable current launcher", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-package-guard-"));
+	try {
+		const packageDir = join(root, "package");
+		const bundleDir = join(packageDir, "dist", "bundles", "123-1");
+		const current = join(packageDir, "dist", "current");
+		await mkdir(bundleDir, { recursive: true });
+		await symlink("bundles/123-1", current, "dir");
+		await writeFile(join(bundleDir, "cli.js"), "launcher");
+		await chmod(join(bundleDir, "cli.js"), 0o755);
+		assert.doesNotThrow(() => assertCodingAgentPackageExecutable(packageDir));
+
+		await chmod(join(bundleDir, "cli.js"), 0o644);
+		assert.throws(
+			() => assertCodingAgentPackageExecutable(packageDir),
+			/Run "npm run build:offline" before packing or publishing/,
+		);
+		await rm(join(bundleDir, "cli.js"));
+		await mkdir(join(bundleDir, "cli.js"));
+		assert.throws(() => assertCodingAgentPackageExecutable(packageDir), /regular executable file/);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
