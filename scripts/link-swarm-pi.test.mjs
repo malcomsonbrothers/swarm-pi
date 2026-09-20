@@ -38,6 +38,8 @@ test("refuses a missing or non-executable current launcher", async () => {
 		await writeFile(currentCli, "not executable");
 
 		assert.throws(() => linkSwarmPi(target, currentCli), /regular executable file/i);
+		await chmod(currentCli, 0o401);
+		assert.throws(() => linkSwarmPi(target, currentCli), /regular executable file/i);
 		await rm(currentCli);
 		await mkdir(currentCli);
 		await chmod(currentCli, 0o755);
