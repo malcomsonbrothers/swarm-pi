@@ -26,7 +26,10 @@ import {
 	createPowerShellTool,
 	createReadOnlyTools,
 	createReadTool,
+	createSwarmHandoffTool,
+	createSwarmHandoffToolDefinition,
 	createWriteTool,
+	hasSwarmIdentity,
 	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
@@ -120,6 +123,8 @@ export {
 	createCodingTools,
 	createReadOnlyTools,
 	createReadTool,
+	createSwarmHandoffTool,
+	createSwarmHandoffToolDefinition,
 	createBashTool,
 	createEditTool,
 	createWriteTool,
@@ -127,6 +132,7 @@ export {
 	createFindTool,
 	createLsTool,
 	createPowerShellTool,
+	hasSwarmIdentity,
 };
 
 // Helper Functions
@@ -385,6 +391,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
 
+	const customTools = [...(options.customTools ?? [])];
+	if (hasSwarmIdentity() && !customTools.some((tool) => tool.name === "swarm_handoff")) {
+		// ToolDefinition's default type parameters are intentionally broad; the
+		// concrete schema is retained by the exported factory and narrowed again
+		// by the runtime validator.
+		customTools.push(createSwarmHandoffToolDefinition(cwd) as unknown as ToolDefinition);
+	}
+
 	const session = new AgentSession({
 		agent,
 		sessionManager,
@@ -392,7 +406,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		cwd,
 		scopedModels: options.scopedModels,
 		resourceLoader,
-		customTools: options.customTools,
+		customTools,
 		modelRuntime,
 		initialActiveToolNames,
 		allowedToolNames,

@@ -62,6 +62,19 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createCliSwarmHandoffHarness,
+	createSwarmHandoffTool,
+	createSwarmHandoffToolDefinition,
+	hasSwarmIdentity,
+	type SwarmHandoffAccepted,
+	SwarmHandoffError,
+	type SwarmHandoffHarness,
+	type SwarmHandoffInput,
+	type SwarmHandoffRefusal,
+	type SwarmHandoffResult,
+	type SwarmHandoffToolOptions,
+} from "./swarm.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
