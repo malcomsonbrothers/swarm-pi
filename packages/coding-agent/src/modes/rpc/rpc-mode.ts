@@ -512,11 +512,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				const queuedDelivery =
 					session.isStreaming && command.streamingBehavior
-						? addPendingRpcDelivery(
-								id,
-								"prompt",
-								command.streamingBehavior === "steer" ? "steering" : "followUp",
-							)
+						? addPendingRpcDelivery(id, "prompt", command.streamingBehavior === "steer" ? "steering" : "followUp")
 						: undefined;
 				let preflightSucceeded = false;
 				let responseWritten = false;
@@ -548,7 +544,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "steer": {
 				const queuedDelivery = addPendingRpcDelivery(id, "steer", "steering");
-			try {
+				try {
 					await session.steer(command.message, command.images, { source: "rpc" });
 					acknowledgeRpcDelivery(queuedDelivery);
 					return success(id, "steer");
@@ -560,7 +556,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			case "follow_up": {
 				const queuedDelivery = addPendingRpcDelivery(id, "follow_up", "followUp");
-			try {
+				try {
 					await session.followUp(command.message, command.images, { source: "rpc" });
 					acknowledgeRpcDelivery(queuedDelivery);
 					return success(id, "follow_up");

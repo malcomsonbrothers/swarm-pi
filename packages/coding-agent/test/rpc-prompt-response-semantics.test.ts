@@ -504,7 +504,9 @@ describe("RPC prompt response semantics", () => {
 
 		try {
 			lineHandler(JSON.stringify({ id: "sigterm-during-graceful", type: "prompt", message: "Start" }));
-			await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "sigterm-during-graceful")).toHaveLength(1));
+			await vi.waitFor(() =>
+				expect(getPromptResponses(rpcIo.outputLines, "sigterm-during-graceful")).toHaveLength(1),
+			);
 			process.emit("SIGUSR2");
 			process.emit("SIGTERM");
 			await vi.waitFor(() => expect(exitCodes).toEqual([0]));

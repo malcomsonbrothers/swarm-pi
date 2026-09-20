@@ -425,11 +425,7 @@ export class Agent {
 		// independent prompt. A prompt accepted before the stop is the exception:
 		// it keeps the stop-after-turn request but uses an open provider gate for
 		// this one turn.
-		if (
-			!allowAfterGracefulStop &&
-			this._stopAfterTurnRequested &&
-			this._noNewRequestsController.signal.aborted
-		) {
+		if (!allowAfterGracefulStop && this._stopAfterTurnRequested && this._noNewRequestsController.signal.aborted) {
 			this._noNewRequestsController = new AbortController();
 		}
 		const messages = this.normalizePromptInput(input, images);
@@ -490,16 +486,37 @@ export class Agent {
 		options: { skipInitialSteeringPoll?: boolean; allowAfterGracefulStop?: boolean } = {},
 	): Promise<void> {
 		const runRequestGate = new AbortController();
-		await this.runWithLifecycle(async (signal) => {
-			await runAgentLoop(
-				messages,
-				this.createContextSnapshot(),
-				this.createLoopConfig({ ...options, noNewRequests: runRequestGate.signal }),
-				(event) => this.processEvents(event),
-				signal,
-				this.streamFunction,
-			);
-		});
+		let providerRequestStarted = false;
+		const onGracefulStop = (): void => {
+			if (providerRequestStarted) runRequestGate.abort();
+		};
+		this._noNewRequestsController.signal.addEventListener("abort", onGracefulStop, { once: true });
+		const streamFunction: StreamFn = (model, context, streamOptions) => {
+			const stoppedBeforeRequest = this._noNewRequestsController.signal.aborted;
+			providerRequestStarted = true;
+			const stream = this.streamFunction(model, context, {
+				...streamOptions,
+				noNewRequests: runRequestGate.signal,
+			});
+			// A graceful stop may have arrived before the accepted prompt reached its
+			// first provider call. Let that first call start, then close its retry gate.
+			if (stoppedBeforeRequest) queueMicrotask(() => runRequestGate.abort());
+			return stream;
+		};
+		try {
+			await this.runWithLifecycle(async (signal) => {
+				await runAgentLoop(
+					messages,
+					this.createContextSnapshot(),
+					this.createLoopConfig({ ...options, noNewRequests: runRequestGate.signal }),
+					(event) => this.processEvents(event),
+					signal,
+					streamFunction,
+				);
+			});
+		} finally {
+			this._noNewRequestsController.signal.removeEventListener("abort", onGracefulStop);
+		}
 	}
 
 	private async runContinuation(): Promise<void> {
