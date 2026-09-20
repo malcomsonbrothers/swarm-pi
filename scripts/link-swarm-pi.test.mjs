@@ -28,6 +28,27 @@ test("replaces a launcher target with one atomic symlink rename", async () => {
 	}
 });
 
+test("accepts a symlink resolving to an executable regular launcher", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-link-swarm-"));
+	try {
+		const currentCli = join(root, "current", "cli.js");
+		const target = join(root, "bin", "swarm-pi");
+		const bundleCli = join(root, "bundles", "cli.js");
+		await mkdir(join(root, "bin"), { recursive: true });
+		await mkdir(join(root, "current"), { recursive: true });
+		await mkdir(join(root, "bundles"), { recursive: true });
+		await writeFile(bundleCli, "symlinked cli");
+		await chmod(bundleCli, 0o755);
+		await symlink(join("..", "bundles", "cli.js"), currentCli);
+
+		linkSwarmPi(target, currentCli);
+
+		assert.equal(await readFile(target, "utf8"), "symlinked cli");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
 test("refuses a missing or non-executable current launcher", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-link-swarm-"));
 	try {
