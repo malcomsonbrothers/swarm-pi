@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { streamSimple as streamOpenAICodexResponses } from "../src/api/openai-codex-responses.ts";
 import type { FetchFunction, Model } from "../src/types.ts";
 import { normalizeContext } from "../src/utils/transcript.ts";
@@ -148,5 +148,24 @@ describe("OpenAI Codex retries", () => {
 		expect(scripted.calls()).toBe(1);
 		expect(output.stopReason).toBe("aborted");
 		expect(output.errorMessage).toContain("Request was aborted");
+	});
+
+	it("removes the retry wait abort listener when the delay resolves", async () => {
+		const scripted = scriptedFetch([
+			() => rateLimited(JSON.stringify({ detail: "Rate limit exceeded" }), { "retry-after": "0" }),
+			() => okResponse(),
+		]);
+		const controller = new AbortController();
+		const addAbortListener = vi.spyOn(controller.signal, "addEventListener");
+		const removeAbortListener = vi.spyOn(controller.signal, "removeEventListener");
+
+		const output = await run(scripted.fetch, { signal: controller.signal });
+
+		expect(output.stopReason).toBe("stop");
+		const added = addAbortListener.mock.calls.filter((call) => call[0] === "abort");
+		expect(added.length).toBeGreaterThan(0);
+		for (const addedListener of added) {
+			expect(removeAbortListener).toHaveBeenCalledWith("abort", addedListener[1]);
+		}
 	});
 });
