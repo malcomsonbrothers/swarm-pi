@@ -6,7 +6,6 @@ import {
 	existsSync,
 	mkdirSync,
 	readdirSync,
-	renameSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -14,6 +13,7 @@ import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
+import { swapBundle } from "./bundle-swap.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
@@ -22,12 +22,10 @@ const aiDistDir = join(repoRoot, "packages", "ai", "dist");
 const codingAgentDistDir = join(codingAgentDir, "dist");
 const bundleDir = join(codingAgentDistDir, "bundle");
 // The bundle is a live command: a daemon runs it, and sessions already running
-// lazy-import chunks by their hashed names. So the new bundle is built in a
-// sibling directory and swapped in by rename, and the previous bundle's chunks
-// that this build did not re-emit are carried over so those imports still
-// resolve after the swap.
+// lazy-import chunks by their hashed names. The new bundle is built completely
+// in staging, then published through a stable symlink so the old complete bundle
+// remains reachable until the new complete bundle is ready.
 const stagingDir = join(codingAgentDistDir, `bundle.staging-${process.pid}`);
-const retiredDir = join(codingAgentDistDir, `bundle.retired-${process.pid}`);
 
 function copyCarriedOverChunks(previousBundleDir, nextBundleDir) {
 	const previousChunks = join(previousBundleDir, "chunks");
@@ -189,7 +187,6 @@ for (const entry of [
 }
 
 rmSync(stagingDir, { force: true, recursive: true });
-rmSync(retiredDir, { force: true, recursive: true });
 mkdirSync(stagingDir, { recursive: true });
 
 let carriedOverChunks = 0;
@@ -244,29 +241,21 @@ try {
 	validateExternalImports([mainResult.metafile, lazyResult.metafile]);
 
 	// Carry over the chunks this build did not re-emit, so a session that lazy
-	// imports one by its old hashed name still resolves it after the swap. Then
-	// swap by rename: the old bundle is complete until the first rename and the
-	// new one is complete from the second, instead of a whole build's worth of
-	// writing into a directory the live command is reading.
+	// imports one by its old hashed name still resolves it after the swap.
 	carriedOverChunks = copyCarriedOverChunks(bundleDir, stagingDir);
-	const hadPreviousBundle = existsSync(bundleDir);
-	if (hadPreviousBundle) renameSync(bundleDir, retiredDir);
-	try {
-		renameSync(stagingDir, bundleDir);
-	} catch (error) {
-		if (hadPreviousBundle && !existsSync(bundleDir)) renameSync(retiredDir, bundleDir);
-		throw error;
-	}
 
+	// The launcher and executable modes are part of staging too. The stable
+	// symlink is flipped only after every file the live command can reach exists.
 	const cliLauncher = `#!/usr/bin/env node
 import { createRequire, enableCompileCache } from "node:module";
 
 enableCompileCache();
 createRequire(import.meta.url)("./cli-runtime.js");
 `;
-	writeFileSync(join(bundleDir, "cli.js"), cliLauncher);
-	chmodSync(join(bundleDir, "cli.js"), 0o755);
-	chmodSync(join(bundleDir, "rpc-entry.js"), 0o755);
+	writeFileSync(join(stagingDir, "cli.js"), cliLauncher);
+	chmodSync(join(stagingDir, "cli.js"), 0o755);
+	chmodSync(join(stagingDir, "rpc-entry.js"), 0o755);
+	swapBundle(bundleDir, stagingDir);
 
 	const files =
 		new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size + 1;
@@ -274,7 +263,6 @@ createRequire(import.meta.url)("./cli-runtime.js");
 	const carried = carriedOverChunks > 0 ? `, ${carriedOverChunks} chunk(s) carried over` : "";
 	console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB${carried})`);
 } finally {
-	// Whatever happened, leave no staging or retired directory beside the bundle.
+	// Whatever happened before publication, leave no staging directory beside the bundle.
 	rmSync(stagingDir, { force: true, recursive: true });
-	rmSync(retiredDir, { force: true, recursive: true });
 }
