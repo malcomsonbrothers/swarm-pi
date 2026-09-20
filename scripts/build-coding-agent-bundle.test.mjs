@@ -4,45 +4,52 @@ import { lstatSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { swapBundle } from "./bundle-swap.mjs";
+import { publishBundle } from "./bundle-swap.mjs";
 
-test("publishes a complete bundle by flipping the stable symlink", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pi-bundle-swap-"));
+test("publishes current atomically without touching the legacy bundle directory", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bundle-publish-"));
 	try {
-		const bundle = join(root, "bundle");
-		const oldBundle = join(root, "bundle.old");
-		const staging = join(root, "bundle.staging");
+		const dist = join(root, "dist");
+		const bundles = join(dist, "bundles");
+		const legacyBundle = join(dist, "bundle");
+		const current = join(dist, "current");
+		const oldBundle = join(bundles, "1000-1");
+		const staging = join(bundles, ".staging");
+		await mkdir(join(legacyBundle, "chunks"), { recursive: true });
+		await writeFile(join(legacyBundle, "cli.js"), "legacy launcher");
 		await mkdir(join(oldBundle, "chunks"), { recursive: true });
 		await writeFile(join(oldBundle, "cli.js"), "old launcher");
-		await symlink("bundle.old", bundle, "dir");
+		await symlink("bundles/1000-1", current, "dir");
 		await mkdir(join(staging, "chunks"), { recursive: true });
 		await writeFile(join(staging, "cli.js"), "new launcher");
 		await writeFile(join(staging, "chunks", "mode.js"), "new mode");
 
-		const published = swapBundle(bundle, staging);
+		const published = publishBundle(current, staging, bundles);
 
-		assert.equal(lstatSync(bundle).isSymbolicLink(), true);
-		assert.equal(await readFile(join(bundle, "cli.js"), "utf8"), "new launcher");
-		assert.equal(await readFile(join(bundle, "chunks", "mode.js"), "utf8"), "new mode");
-		assert.equal(await readFile(join(published, "cli.js"), "utf8"), "new launcher");
+		assert.equal(lstatSync(current).isSymbolicLink(), true);
+		assert.match(published, /bundles\/\d+-\d+$/);
+		assert.equal(await readFile(join(current, "cli.js"), "utf8"), "new launcher");
+		assert.equal(await readFile(join(current, "chunks", "mode.js"), "utf8"), "new mode");
 		assert.equal(await readFile(join(oldBundle, "cli.js"), "utf8"), "old launcher");
+		assert.equal(await readFile(join(legacyBundle, "cli.js"), "utf8"), "legacy launcher");
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
 });
 
-test("rejects an old-style bundle directory instead of creating a gap", async () => {
-	const root = await mkdtemp(join(tmpdir(), "pi-bundle-swap-"));
+test("rejects a real current directory without moving any bundle", async () => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bundle-publish-"));
 	try {
-		const bundle = join(root, "bundle");
-		const staging = join(root, "bundle.staging");
-		await mkdir(bundle);
-		await mkdir(staging);
+		const dist = join(root, "dist");
+		const bundles = join(dist, "bundles");
+		const current = join(dist, "current");
+		const staging = join(bundles, ".staging");
+		await mkdir(current, { recursive: true });
+		await mkdir(staging, { recursive: true });
 
-		assert.throws(
-			() => swapBundle(bundle, staging),
-			/Cannot atomically replace .* it is a directory.*symlink/,
-		);
+		assert.throws(() => publishBundle(current, staging, bundles), /must be a symlink or absent/);
+		assert.equal(lstatSync(current).isDirectory(), true);
+		assert.equal(lstatSync(staging).isDirectory(), true);
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}

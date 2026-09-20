@@ -13,19 +13,20 @@ import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
-import { swapBundle } from "./bundle-swap.mjs";
+import { publishBundle } from "./bundle-swap.mjs";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptDir, "..");
 const codingAgentDir = join(repoRoot, "packages", "coding-agent");
 const aiDistDir = join(repoRoot, "packages", "ai", "dist");
 const codingAgentDistDir = join(codingAgentDir, "dist");
-const bundleDir = join(codingAgentDistDir, "bundle");
-// The bundle is a live command: a daemon runs it, and sessions already running
-// lazy-import chunks by their hashed names. The new bundle is built completely
-// in staging, then published through a stable symlink so the old complete bundle
-// remains reachable until the new complete bundle is ready.
-const stagingDir = join(codingAgentDistDir, `bundle.staging-${process.pid}`);
+const bundlesDir = join(codingAgentDistDir, "bundles");
+const currentBundleDir = join(codingAgentDistDir, "current");
+// dist/bundle is a legacy live directory and is intentionally never touched. The
+// new bundle is built completely in dist/bundles staging, then published under a
+// new versioned directory through the stable dist/current symlink. Sessions that
+// already imported the old bundle keep resolving its retained lazy chunks.
+const stagingDir = join(bundlesDir, `.staging-${process.pid}`);
 
 function copyCarriedOverChunks(previousBundleDir, nextBundleDir) {
 	const previousChunks = join(previousBundleDir, "chunks");
@@ -242,7 +243,7 @@ try {
 
 	// Carry over the chunks this build did not re-emit, so a session that lazy
 	// imports one by its old hashed name still resolves it after the swap.
-	carriedOverChunks = copyCarriedOverChunks(bundleDir, stagingDir);
+	carriedOverChunks = copyCarriedOverChunks(currentBundleDir, stagingDir);
 
 	// The launcher and executable modes are part of staging too. The stable
 	// symlink is flipped only after every file the live command can reach exists.
@@ -255,13 +256,13 @@ createRequire(import.meta.url)("./cli-runtime.js");
 	writeFileSync(join(stagingDir, "cli.js"), cliLauncher);
 	chmodSync(join(stagingDir, "cli.js"), 0o755);
 	chmodSync(join(stagingDir, "rpc-entry.js"), 0o755);
-	swapBundle(bundleDir, stagingDir);
+	publishBundle(currentBundleDir, stagingDir, bundlesDir);
 
 	const files =
 		new Set([...Object.keys(mainResult.metafile.outputs), ...Object.keys(lazyResult.metafile.outputs)]).size + 1;
 	const mib = (outputBytes([mainResult.metafile, lazyResult.metafile]) + cliLauncher.length) / (1024 * 1024);
 	const carried = carriedOverChunks > 0 ? `, ${carriedOverChunks} chunk(s) carried over` : "";
-	console.log(`Built ${relative(repoRoot, bundleDir)} (${files} files, ${mib.toFixed(1)} MiB${carried})`);
+	console.log(`Built ${relative(repoRoot, currentBundleDir)} (${files} files, ${mib.toFixed(1)} MiB${carried})`);
 } finally {
 	// Whatever happened before publication, leave no staging directory beside the bundle.
 	rmSync(stagingDir, { force: true, recursive: true });

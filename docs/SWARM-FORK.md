@@ -42,6 +42,18 @@ Three source files change:
 
 No existing field, behaviour or file is altered.
 
+## Swarm build and rollback
+
+`npm run build:offline` builds a complete bundle in `packages/coding-agent/dist/bundles/.staging-<pid>`, renames it to a versioned directory, and atomically replaces the `packages/coding-agent/dist/current` symlink. The legacy `dist/bundle` directory is never moved or replaced; running daemons may continue using it. The publisher retains the newest three versioned bundles and does not delete any bundle younger than seven days.
+
+The owner's orchestrator installs the launcher separately, also as one atomic symlink rename:
+
+```bash
+node scripts/link-swarm-pi.mjs /path/to/bin/swarm-pi
+```
+
+The script refuses a missing or non-executable `dist/current/cli.js`. Do not run it against the live `/root/.bun/bin/swarm-pi` from this worktree. To roll back, atomically point `dist/current` or the bin symlink at a retained `dist/bundles/<stamp>-<pid>/cli.js`, then restart the daemon. Existing processes stay on the bundle directory they already resolved.
+
 ## Why
 
 Swarm records two cost numbers per node today: a real cost and a normalised cost. It
