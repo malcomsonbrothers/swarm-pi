@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Agent } from "@earendil-works/pi-agent-core";
 import { type AssistantMessage, createAssistantMessageEventStream, fauxAssistantMessage } from "@earendil-works/pi-ai";
-import { getModel, streamSimple } from "@earendil-works/pi-ai/compat";
+import { getModel, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -130,6 +130,38 @@ describe("AgentSession auto-compaction queue resume", () => {
 		await expect(runAutoCompaction("threshold", false)).resolves.toBe(true);
 
 		expect(continueSpy).not.toHaveBeenCalled();
+	});
+
+	it("passes the graceful-stop gate to summarization credential resolution", async () => {
+		const model = session.model!;
+		let markAuthStarted!: () => void;
+		const authStarted = new Promise<void>((resolve) => {
+			markAuthStarted = resolve;
+		});
+		const getAuth = vi.spyOn(session.modelRuntime, "getAuth").mockImplementation(async (_model, options) => {
+			markAuthStarted();
+			return new Promise<never>((_resolve, reject) => {
+				if (!options?.noNewRequests) return;
+				options.noNewRequests.addEventListener("abort", () => reject(new Error("credential resolver aborted")), {
+					once: true,
+				});
+			});
+		});
+
+		const getSummarizationRequestAuth = (
+			session as unknown as {
+				_getSummarizationRequestAuth: (model: Model<any>, signal?: AbortSignal) => Promise<unknown>;
+			}
+		)._getSummarizationRequestAuth.bind(session);
+		const authPromise = getSummarizationRequestAuth(model, new AbortController().signal);
+		await authStarted;
+		session.agent.requestStopAfterTurn();
+
+		await expect(authPromise).rejects.toThrow("credential resolver aborted");
+		expect(getAuth).toHaveBeenCalledWith(
+			model,
+			expect.objectContaining({ noNewRequests: session.agent.noNewRequestsSignal }),
+		);
 	});
 
 	it("does not start a summarization retry after graceful stop", async () => {

@@ -438,7 +438,10 @@ export class AgentSession {
 	}> {
 		let result: AuthResult | undefined;
 		try {
-			result = await this._modelRuntime.getAuth(model, { signal });
+			result = await this._modelRuntime.getAuth(model, {
+				signal,
+				noNewRequests: this.agent.noNewRequestsSignal,
+			});
 		} catch (error) {
 			const cause = error instanceof Error ? error.cause : undefined;
 			if (cause instanceof Error && cause.message === "authHeader requires a resolved API key") {
@@ -481,7 +484,10 @@ export class AgentSession {
 		}
 
 		try {
-			const result = await this._modelRuntime.getAuth(model, { signal });
+			const result = await this._modelRuntime.getAuth(model, {
+				signal,
+				noNewRequests: this.agent.noNewRequestsSignal,
+			});
 			if (!result) return { model };
 			const requestModel = result.auth.baseUrl ? { ...model, baseUrl: result.auth.baseUrl } : model;
 			return {
@@ -491,7 +497,7 @@ export class AgentSession {
 				env: result.env,
 			};
 		} catch (error) {
-			if (signal?.aborted) throw error;
+			if (signal?.aborted || this.agent.noNewRequestsSignal.aborted) throw error;
 			return { model };
 		}
 	}
