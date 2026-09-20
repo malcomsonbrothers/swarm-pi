@@ -234,6 +234,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Return replacement context/model/thinking state or messages to append to affect that turn.
 	 * Return undefined to keep using the current context/config.
 	 */
+	/**
+	 * Called before preparing the next turn and immediately before its provider request.
+	 * Return true to end the loop without starting another turn. This is intended for
+	 * a stop request that may arrive while next-turn preparation is running.
+	 */
+	shouldStopBeforeNextTurn?: () => boolean | Promise<boolean>;
+
 	prepareNextTurn?: (
 		context: PrepareNextTurnContext,
 	) => AgentLoopTurnUpdate | undefined | Promise<AgentLoopTurnUpdate | undefined>;

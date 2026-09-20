@@ -503,6 +503,7 @@ export class Agent {
 				if (this._stopAfterTurnRequested) return true;
 				return shouldStopAfterTurn ? await shouldStopAfterTurn(context, this.signal) : false;
 			},
+			shouldStopBeforeNextTurn: () => this._stopAfterTurnRequested,
 			prepareNextTurn:
 				this.prepareNextTurnWithContext || this.prepareNextTurn
 					? async (context) => {

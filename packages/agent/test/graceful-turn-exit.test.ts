@@ -1,7 +1,7 @@
 import { type AssistantMessage, type AssistantMessageEvent, EventStream } from "@earendil-works/pi-ai/compat";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { Agent, type AgentEvent, type AgentTool, type StreamFn } from "../src/index.ts";
+import { Agent, type AgentEvent, type AgentOptions, type AgentTool, type StreamFn } from "../src/index.ts";
 
 // The graceful turn exit the daemon asks for with SIGUSR2: the turn in flight
 // finishes, every tool call of that turn records its result, and no further
@@ -85,7 +85,11 @@ function createStreamFn(state: { calls: number }): StreamFn {
 	};
 }
 
-function createAgent(streamFn: StreamFn, tools: AgentTool<any>[]): Agent {
+function createAgent(
+	streamFn: StreamFn,
+	tools: AgentTool<any>[],
+	options: Pick<AgentOptions, "shouldStopAfterTurn" | "prepareNextTurnWithContext"> = {},
+): Agent {
 	return new Agent({
 		streamFn,
 		initialState: {
@@ -104,6 +108,7 @@ function createAgent(streamFn: StreamFn, tools: AgentTool<any>[]): Agent {
 				maxTokens: 2048,
 			} as never,
 		},
+		...options,
 	});
 }
 
@@ -172,6 +177,41 @@ describe("requestStopAfterTurn", () => {
 		expect(agent.stopAfterTurnRequested).toBe(false);
 		await agent.prompt("again");
 		expect(state.calls).toBe(2);
+	});
+
+	it("checks the graceful stop before preparation and immediately before the next provider request", async () => {
+		const firstState = { calls: 0 };
+		let firstAgent: Agent | undefined;
+		let firstPreparationCalls = 0;
+		firstAgent = createAgent(createStreamFn(firstState), [], {
+			shouldStopAfterTurn: () => {
+				firstAgent?.requestStopAfterTurn();
+				return false;
+			},
+			prepareNextTurnWithContext: async () => {
+				firstPreparationCalls++;
+				return undefined;
+			},
+		});
+
+		await firstAgent.prompt("stop before preparation");
+		expect(firstState.calls).toBe(1);
+		expect(firstPreparationCalls).toBe(0);
+
+		const secondState = { calls: 0 };
+		let secondAgent: Agent | undefined;
+		let secondPreparationCalls = 0;
+		secondAgent = createAgent(createStreamFn(secondState), [], {
+			prepareNextTurnWithContext: async () => {
+				secondPreparationCalls++;
+				secondAgent?.requestStopAfterTurn();
+				return undefined;
+			},
+		});
+
+		await secondAgent.prompt("stop during preparation");
+		expect(secondState.calls).toBe(1);
+		expect(secondPreparationCalls).toBe(1);
 	});
 
 	it("does not stop a turn when nothing asked it to", async () => {

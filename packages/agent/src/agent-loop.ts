@@ -181,6 +181,10 @@ async function runLoop(
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
 			let preparedMessages: AgentMessage[] = [];
 			if (lastCompletedTurn) {
+				if (await config.shouldStopBeforeNextTurn?.()) {
+					await emit({ type: "agent_end", messages: newMessages });
+					return;
+				}
 				const nextTurnSnapshot = await config.prepareNextTurn?.(lastCompletedTurn);
 				if (nextTurnSnapshot) {
 					currentContext = nextTurnSnapshot.context ?? currentContext;
@@ -215,7 +219,18 @@ async function runLoop(
 			pendingMessages = [];
 
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, emit, streamFunction);
+			const message = await streamAssistantResponse(
+				currentContext,
+				config,
+				signal,
+				emit,
+				streamFunction,
+				lastCompletedTurn !== undefined,
+			);
+			if (!message) {
+				await emit({ type: "agent_end", messages: newMessages });
+				return;
+			}
 			newMessages.push(message);
 
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
@@ -342,7 +357,8 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	streamFunction: StreamFn,
-): Promise<AssistantMessage> {
+	checkStopBeforeRequest: boolean,
+): Promise<AssistantMessage | undefined> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
 	if (config.transformContext) {
@@ -357,6 +373,8 @@ async function streamAssistantResponse(
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+
+	if (checkStopBeforeRequest && (await config.shouldStopBeforeNextTurn?.())) return undefined;
 
 	const response = await streamFunction(config.model, llmContext, {
 		...config,
