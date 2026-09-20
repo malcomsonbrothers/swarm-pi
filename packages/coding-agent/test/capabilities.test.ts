@@ -21,6 +21,7 @@ describe("--capabilities", () => {
 		expect(lines[lines.length - 1]).toBe("");
 		expect(lines.slice(0, -1)).toEqual([...CAPABILITIES]);
 		expect(lines).toContain("graceful-turn-exit");
+		expect(lines).toContain("rpc-graceful-turn-exit");
 		for (const line of lines.slice(0, -1)) {
 			expect(line).toMatch(/^[a-z0-9-]+$/);
 		}

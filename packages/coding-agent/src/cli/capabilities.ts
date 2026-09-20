@@ -6,8 +6,10 @@
  * Names are stable once published. Add a new name rather than change one.
  */
 export const CAPABILITIES: readonly string[] = [
-	// Print mode finishes the turn in flight on SIGUSR2 and exits 0.
+	// Print mode and RPC mode finish the turn in flight on SIGUSR2 and exit 0.
 	"graceful-turn-exit",
+	// RPC mode handles the same graceful signal while driven over JSON lines.
+	"rpc-graceful-turn-exit",
 	// ~/.pi/agent/codex-service-tier needs the full consent sentence for "priority".
 	"codex-service-tier-consent",
 	// `--mode json` streams one JSON event per line.

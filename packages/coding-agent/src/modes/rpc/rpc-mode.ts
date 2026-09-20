@@ -47,6 +47,30 @@ export type {
 	RpcSessionState,
 } from "./rpc-types.ts";
 
+export interface RpcSignalHandlerOptions {
+	onShutdown: (exitCode: number, signal: NodeJS.Signals) => void;
+	onGracefulStop: () => void;
+}
+
+/** Install RPC process handlers; SIGUSR2 closes only after the current turn settles. */
+export function registerRpcSignalHandlers(options: RpcSignalHandlerOptions): () => void {
+	const registrations: Array<{ signal: NodeJS.Signals; handler: () => void }> = [];
+	const add = (signal: NodeJS.Signals, handler: () => void): void => {
+		process.on(signal, handler);
+		registrations.push({ signal, handler });
+	};
+
+	add("SIGTERM", () => options.onShutdown(143, "SIGTERM"));
+	if (process.platform !== "win32") {
+		add("SIGHUP", () => options.onShutdown(129, "SIGHUP"));
+		add("SIGUSR2", options.onGracefulStop);
+	}
+
+	return () => {
+		for (const { signal, handler } of registrations) process.off(signal, handler);
+	};
+}
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
@@ -84,6 +108,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 	// Shutdown request flag
 	let shutdownRequested = false;
+	let gracefulExitRequested = false;
 	let shuttingDown = false;
 	const signalCleanupHandlers: Array<() => void> = [];
 
@@ -363,24 +388,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		});
 	};
 
-	const registerSignalHandlers = (): void => {
-		const signals: NodeJS.Signals[] = ["SIGTERM"];
-		if (process.platform !== "win32") {
-			signals.push("SIGHUP");
-		}
-
-		for (const signal of signals) {
-			const handler = () => {
-				killTrackedDetachedChildren();
-				void shutdown(signal === "SIGHUP" ? 129 : 143, signal);
-			};
-			process.on(signal, handler);
-			signalCleanupHandlers.push(() => process.off(signal, handler));
-		}
-	};
-
 	await rebindSession();
-	registerSignalHandlers();
+	signalCleanupHandlers.push(
+		registerRpcSignalHandlers({
+			onShutdown: (exitCode, signal) => {
+				killTrackedDetachedChildren();
+				void shutdown(exitCode, signal);
+			},
+			onGracefulStop: () => {
+				if (gracefulExitRequested) return;
+				gracefulExitRequested = true;
+				shutdownRequested = true;
+				session.agent.requestStopAfterTurn();
+				void session.waitForIdle().then(() => checkShutdownRequested());
+			},
+		}),
+	);
 
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse | undefined> => {
@@ -392,6 +415,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "prompt": {
+				if (gracefulExitRequested) return error(id, "prompt", "RPC session is stopping gracefully");
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
@@ -416,11 +440,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "steer": {
+				if (gracefulExitRequested) return error(id, "steer", "RPC session is stopping gracefully");
 				await session.steer(command.message, command.images, { source: "rpc" });
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
+				if (gracefulExitRequested) return error(id, "follow_up", "RPC session is stopping gracefully");
 				await session.followUp(command.message, command.images, { source: "rpc" });
 				return success(id, "follow_up");
 			}
@@ -533,6 +559,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "compact": {
+				if (gracefulExitRequested) return error(id, "compact", "RPC session is stopping gracefully");
 				const result = await session.compact(command.customInstructions);
 				return success(id, "compact", result);
 			}

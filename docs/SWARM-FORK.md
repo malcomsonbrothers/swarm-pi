@@ -44,7 +44,7 @@ No existing field, behaviour or file is altered.
 
 ## Swarm build and rollback
 
-`npm run build:offline` builds a complete bundle in `packages/coding-agent/dist/bundles/.staging-<pid>`, renames it to a versioned directory, and atomically replaces the `packages/coding-agent/dist/current` symlink. The legacy `dist/bundle` directory is never moved or replaced; running daemons may continue using it. The publisher retains the newest three versioned bundles and does not delete any bundle younger than seven days.
+`npm run build:offline` builds a complete bundle in `packages/coding-agent/dist/bundles/.staging-<pid>`, renames it to a versioned directory, and atomically replaces the `packages/coding-agent/dist/current` symlink. The legacy `dist/bundle` directory is never moved or replaced; running daemons may continue using it. The publisher retains the newest three versioned bundles and does not delete any bundle younger than seven days. `npm pack` temporarily materializes `dist/current` because npm does not preserve package symlinks, then restores the stable symlink after packing; the package bin and RPC export still resolve through `dist/current`.
 
 The owner's orchestrator installs the launcher separately, also as one atomic symlink rename:
 
@@ -52,7 +52,13 @@ The owner's orchestrator installs the launcher separately, also as one atomic sy
 node scripts/link-swarm-pi.mjs /path/to/bin/swarm-pi
 ```
 
-The script refuses a missing or non-executable `dist/current/cli.js`. Do not run it against the live `/root/.bun/bin/swarm-pi` from this worktree. To roll back, atomically point `dist/current` or the bin symlink at a retained `dist/bundles/<stamp>-<pid>/cli.js`, then restart the daemon. Existing processes stay on the bundle directory they already resolved.
+The script refuses a missing, non-regular, or non-executable `dist/current/cli.js`. Do not run it against the live `/root/.bun/bin/swarm-pi` from this worktree. To roll back, atomically point `dist/current` or the bin symlink at a retained `dist/bundles/<stamp>-<pid>/cli.js`, then restart the daemon. Existing processes stay on the bundle directory they already resolved.
+
+## Runtime compatibility
+
+The swarm daemon launches pi with `--mode rpc` (`src/pi/rpc-client.ts`) and its graceful shutdown path sends `SIGUSR2` to the owned process group (`src/daemon/live.ts`). RPC mode now handles that signal with the same `Agent.requestStopAfterTurn()` gate used by print mode, waits for the session to settle, and exits cleanly. The build advertises both `graceful-turn-exit` for existing daemon probes and the more specific `rpc-graceful-turn-exit` capability.
+
+The no-new-request gate covers the running turn: credential resolution and OAuth refresh, generic provider retries, provider calls, automatic retry, compaction and summarization retries, and cache warming. Model catalog refresh, model listing, and bug-report summaries remain intentionally ungated. They are startup/control-plane operations, not requests started by the active turn in print or RPC mode; no RPC command starts a remote catalog refresh or bug-report summary.
 
 ## Why
 
