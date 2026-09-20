@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	CODEX_PRIORITY_TIER_CONSENT,
 	CODEX_SERVICE_TIER_FILE_ENV,
@@ -43,6 +43,7 @@ afterEach(() => {
 	rmSync(homeDir, { recursive: true, force: true });
 	rmSync(runDir, { recursive: true, force: true });
 	delete process.env[CODEX_SERVICE_TIER_FILE_ENV];
+	vi.unstubAllGlobals();
 	resetCodexPriorityTierWarning();
 });
 
@@ -162,53 +163,103 @@ function createModel(): Model<"openai-codex-responses"> {
 		baseUrl: "https://chatgpt.com/backend-api/codex",
 		reasoning: true,
 		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 272_000,
 		maxTokens: 128_000,
 	};
 }
 
-/** One completed SSE response that claims the default tier, whatever was asked for. */
-function scriptedFetch(): { fetch: FetchFunction } {
-	const fetch: FetchFunction = async () => {
-		const completed = {
-			type: "response.completed",
-			sequence_number: 9,
-			response: {
-				id: "resp_tier",
-				status: "completed",
-				service_tier: "default",
-				output: [],
-				usage: {
-					input_tokens: 10,
-					input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
-					output_tokens: 2,
-					output_tokens_details: { reasoning_tokens: 0 },
-					total_tokens: 12,
-				},
+/** One completed response that claims the default tier, whatever was asked for. */
+function completedEvent(): Record<string, unknown> {
+	return {
+		type: "response.completed",
+		sequence_number: 9,
+		response: {
+			id: "resp_tier",
+			status: "completed",
+			service_tier: "default",
+			output: [],
+			usage: {
+				input_tokens: 10,
+				input_tokens_details: { cached_tokens: 0, cache_write_tokens: 0 },
+				output_tokens: 2,
+				output_tokens_details: { reasoning_tokens: 0 },
+				total_tokens: 12,
 			},
-		};
-		return new Response(`data: ${JSON.stringify(completed)}\n\n`, {
+		},
+	};
+}
+
+function scriptedFetch(): { fetch: FetchFunction } {
+	const fetch: FetchFunction = async () =>
+		new Response(`data: ${JSON.stringify(completedEvent())}\n\n`, {
 			status: 200,
 			headers: { "content-type": "text/event-stream" },
 		});
-	};
 	return { fetch };
 }
 
-/** Runs one turn against the scripted fetch and reports the tier the request carried. */
-async function runTurn(): Promise<{ requestedTier: unknown; providerExtra: Record<string, unknown> }> {
+function installWebSocketMock(): void {
+	class MockWebSocket {
+		static OPEN = 1;
+		private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+		readyState = MockWebSocket.OPEN;
+
+		constructor(_url: string, _protocols?: string | string[] | { headers?: Record<string, string> }) {
+			queueMicrotask(() => this.dispatch("open", {}));
+		}
+
+		addEventListener(type: string, listener: (event: unknown) => void): void {
+			let listeners = this.listeners.get(type);
+			if (!listeners) {
+				listeners = new Set();
+				this.listeners.set(type, listeners);
+			}
+			listeners.add(listener);
+		}
+
+		removeEventListener(type: string, listener: (event: unknown) => void): void {
+			this.listeners.get(type)?.delete(listener);
+		}
+
+		send(): void {
+			queueMicrotask(() => this.dispatch("message", { data: JSON.stringify(completedEvent()) }));
+		}
+
+		close(): void {
+			this.readyState = 3;
+		}
+
+		private dispatch(type: string, event: unknown): void {
+			for (const listener of this.listeners.get(type) ?? []) listener(event);
+		}
+	}
+
+	vi.stubGlobal("WebSocket", MockWebSocket);
+}
+
+/** Runs one turn against a scripted response and reports the tier the request carried. */
+async function runTurn(transport: "sse" | "websocket"): Promise<{
+	requestedTier: unknown;
+	providerExtra: Record<string, unknown>;
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+}> {
+	if (transport === "websocket") installWebSocketMock();
 	let requestedTier: unknown;
 	const output = await streamOpenAICodexResponses(createModel(), context, {
 		apiKey,
 		fetch: scriptedFetch().fetch,
-		transport: "sse",
+		transport,
 		onPayload: (payload) => {
 			requestedTier = (payload as { service_tier?: unknown }).service_tier;
 			return undefined;
 		},
 	}).result();
-	return { requestedTier, providerExtra: (output.usage.providerExtra ?? {}) as Record<string, unknown> };
+	return {
+		requestedTier,
+		providerExtra: (output.usage.providerExtra ?? {}) as Record<string, unknown>,
+		cost: output.usage.cost,
+	};
 }
 
 describe("codex_service_tier_requested", () => {
@@ -216,17 +267,34 @@ describe("codex_service_tier_requested", () => {
 		runFlagFile(CODEX_PRIORITY_TIER_CONSENT);
 		process.env[CODEX_SERVICE_TIER_FILE_ENV] = runFlagFilePath();
 
-		const { requestedTier, providerExtra } = await runTurn();
+		const { requestedTier, providerExtra } = await runTurn("sse");
 
 		expect(requestedTier).toBe("priority");
 		// The response claimed "default"; the record keeps what pi asked for.
 		expect(providerExtra).toMatchObject({ codex_service_tier_requested: "priority" });
 	});
 
+	it.each(["sse", "websocket"] as const)(
+		"prices the requested priority tier when the %s response says default",
+		async (transport) => {
+			runFlagFile(CODEX_PRIORITY_TIER_CONSENT);
+			process.env[CODEX_SERVICE_TIER_FILE_ENV] = runFlagFilePath();
+
+			const { requestedTier, cost } = await runTurn(transport);
+
+			expect(requestedTier).toBe("priority");
+			expect(cost.input).toBeCloseTo(20e-6);
+			expect(cost.output).toBeCloseTo(8e-6);
+			expect(cost.cacheRead).toBe(0);
+			expect(cost.cacheWrite).toBe(0);
+			expect(cost.total).toBeCloseTo(28e-6);
+		},
+	);
+
 	it("is absent when no tier was requested", async () => {
 		process.env[CODEX_SERVICE_TIER_FILE_ENV] = runFlagFilePath();
 
-		const { requestedTier, providerExtra } = await runTurn();
+		const { requestedTier, providerExtra } = await runTurn("sse");
 
 		expect(requestedTier).toBeUndefined();
 		expect(providerExtra).not.toHaveProperty("codex_service_tier_requested");

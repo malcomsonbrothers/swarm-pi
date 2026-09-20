@@ -533,7 +533,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 				startEmitted = true;
 				stream.push({ type: "start", partial: output });
 			}
-			await processStream(response, output, stream, model, grammarToolInputProperties, options);
+			await processStream(response, output, stream, model, grammarToolInputProperties, options, body.service_tier);
 			// processStream resets providerExtra for the attempt that answered, so the
 			// retry count is merged after it, not before.
 			mergeProviderExtra(output, retryProviderExtra(retryAttempts, lastRetryAfterSeconds));
@@ -823,11 +823,12 @@ async function processStream(
 	model: Model<"openai-codex-responses">,
 	grammarToolInputProperties: ReadonlyMap<string, string>,
 	options?: OpenAICodexResponsesOptions,
+	requestServiceTier?: ResponseCreateParamsStreaming["service_tier"],
 ): Promise<void> {
 	resetProviderExtra(output);
 	mergeProviderExtra(output, codexRateLimitHeaderExtras(response.headers));
 	await processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal), output), output, stream, model, {
-		serviceTier: options?.serviceTier,
+		serviceTier: requestServiceTier,
 		grammarToolInputProperties,
 		resolveServiceTier: resolveCodexServiceTier,
 		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -1811,7 +1812,7 @@ async function processWebSocketStream(
 			stream,
 			model,
 			{
-				serviceTier: options?.serviceTier,
+				serviceTier: body.service_tier,
 				grammarToolInputProperties,
 				resolveServiceTier: resolveCodexServiceTier,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
