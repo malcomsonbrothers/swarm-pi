@@ -58,7 +58,7 @@ The script refuses a missing, non-regular, or non-executable `dist/current/cli.j
 
 The swarm daemon launches pi with `--mode rpc` (`src/pi/rpc-client.ts`) and its graceful shutdown path sends `SIGUSR2` to the owned process group (`src/daemon/live.ts`). RPC mode now handles that signal with the same `Agent.requestStopAfterTurn()` gate used by print mode, waits for the session to settle, and exits cleanly. The build advertises both `graceful-turn-exit` for existing daemon probes and the more specific `rpc-graceful-turn-exit` capability.
 
-The no-new-request gate covers the running turn: credential resolution and OAuth refresh, generic provider retries, provider calls, automatic retry, compaction and summarization retries, and cache warming. Model catalog refresh, model listing, and bug-report summaries remain intentionally ungated. They are startup/control-plane operations, not requests started by the active turn in print or RPC mode; no RPC command starts a remote catalog refresh or bug-report summary.
+The no-new-request gate covers the running turn: credential resolution and OAuth refresh, generic provider retries, provider calls, automatic retry, compaction and summarization retries, and cache warming. Model catalog refresh, model listing, and bug-report summaries remain intentionally ungated. They are startup/control-plane operations, not requests started by the active turn in print or RPC mode; no RPC command starts a remote catalog refresh or bug-report summary. Cancellation of credential reads is out of scope for graceful shutdown. Cancellation of OAuth refreshes is out of scope for graceful shutdown.
 
 ## Why
 
