@@ -561,7 +561,7 @@ export const stream: StreamFunction<"openai-codex-responses", OpenAICodexRespons
 						!lastError.message.includes("usage limit")
 					) {
 						retryAttempts++;
-						await sleep(backoffDelayMs(attempt), options?.signal);
+						await sleep(backoffDelayMs(attempt), options?.signal, options?.noNewRequests);
 						continue;
 					}
 					throw lastError;

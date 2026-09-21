@@ -164,6 +164,24 @@ describe("OpenAI Codex retries", () => {
 		expect(output.errorMessage).toContain("Codex rate limit: Rate limit exceeded");
 	});
 
+	it("interrupts network retry backoff when the graceful gate closes", async () => {
+		let calls = 0;
+		const gate = new AbortController();
+		const fetch: FetchFunction = async () => {
+			calls++;
+			if (calls === 1) setTimeout(() => gate.abort(), 20);
+			throw new Error("network down");
+		};
+
+		const started = Date.now();
+		const output = await run(fetch, { noNewRequests: gate.signal });
+
+		expect(Date.now() - started).toBeLessThan(500);
+		expect(calls).toBe(1);
+		expect(output.stopReason).toBe("error");
+		expect(output.errorMessage).toBeTruthy();
+	});
+
 	it("removes the retry wait abort listener when the delay resolves", async () => {
 		const scripted = scriptedFetch([
 			() => rateLimited(JSON.stringify({ detail: "Rate limit exceeded" }), { "retry-after": "0" }),

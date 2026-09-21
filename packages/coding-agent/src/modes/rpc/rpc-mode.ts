@@ -120,6 +120,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		message: string | undefined;
 		acknowledged: boolean;
 		queued: boolean;
+		/** The queue removed this command, but no provider turn has confirmed delivery yet. */
+		consumed: boolean;
 	};
 	const pendingRpcDeliveries: PendingRpcDelivery[] = [];
 	let queueSnapshot: { steering: string[]; followUp: string[] } = { steering: [], followUp: [] };
@@ -140,6 +142,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			message: undefined,
 			acknowledged: false,
 			queued: false,
+			consumed: false,
 		};
 		pendingRpcDeliveries.push(delivery);
 		return delivery;
@@ -150,17 +153,47 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		if (index !== -1) pendingRpcDeliveries.splice(index, 1);
 	};
 
+	const markConsumedMessages = (
+		lane: PendingRpcDelivery["lane"],
+		previousMessages: readonly string[],
+		nextMessages: readonly string[],
+	): void => {
+		const remaining = new Map<string, number>();
+		for (const message of nextMessages) remaining.set(message, (remaining.get(message) ?? 0) + 1);
+		for (const message of previousMessages) {
+			const available = remaining.get(message) ?? 0;
+			if (available > 0) {
+				remaining.set(message, available - 1);
+				continue;
+			}
+			const delivery = pendingRpcDeliveries.find(
+				(candidate) =>
+					candidate.lane === lane && candidate.queued && !candidate.consumed && candidate.message === message,
+			);
+			if (delivery) {
+				delivery.queued = false;
+				delivery.consumed = true;
+			}
+		}
+	};
+
 	const updateQueueSnapshot = (next: { steering: readonly string[]; followUp: readonly string[] }): void => {
 		const previous = queueSnapshot;
 		queueSnapshot = { steering: [...next.steering], followUp: [...next.followUp] };
 		for (const lane of ["steering", "followUp"] as const) {
-			const available = [...queueForLane(lane)];
+			const nextMessages = lane === "steering" ? next.steering : next.followUp;
 			const previousMessages = lane === "steering" ? previous.steering : previous.followUp;
+			markConsumedMessages(lane, previousMessages, nextMessages);
+
+			const available = [...nextMessages];
 			for (const message of previousMessages) {
 				const index = available.indexOf(message);
 				if (index !== -1) available.splice(index, 1);
 			}
-			const candidates = pendingRpcDeliveries.filter((delivery) => delivery.lane === lane && !delivery.queued);
+			const candidates = pendingRpcDeliveries.filter(
+				(delivery) =>
+					delivery.lane === lane && !delivery.queued && !delivery.consumed && delivery.message === undefined,
+			);
 			for (const message of available) {
 				const delivery = candidates.shift();
 				if (!delivery) break;
@@ -168,23 +201,26 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				delivery.queued = true;
 			}
 		}
-		for (const delivery of [...pendingRpcDeliveries]) {
-			if (!delivery.acknowledged || !delivery.queued || delivery.message === undefined) continue;
-			if (!queueForLane(delivery.lane).includes(delivery.message)) removePendingRpcDelivery(delivery);
-		}
 	};
 
 	const acknowledgeRpcDelivery = (delivery: PendingRpcDelivery): void => {
 		delivery.acknowledged = true;
-		if (!delivery.queued) removePendingRpcDelivery(delivery);
+		if (!delivery.queued && !delivery.consumed) removePendingRpcDelivery(delivery);
 		else updateQueueSnapshot(queueSnapshot);
+	};
+
+	const markConsumedDeliveriesDelivered = (): void => {
+		for (const delivery of [...pendingRpcDeliveries]) {
+			if (delivery.consumed) removePendingRpcDelivery(delivery);
+		}
 	};
 
 	const notDeliveredAfterGracefulStop = (): RpcCommandNotDeliveredEvent[] => {
 		const events: RpcCommandNotDeliveredEvent[] = [];
 		for (const delivery of pendingRpcDeliveries) {
-			if (!delivery.acknowledged || !delivery.queued || delivery.message === undefined) continue;
-			if (!queueForLane(delivery.lane).includes(delivery.message)) continue;
+			if (!delivery.acknowledged || delivery.message === undefined) continue;
+			if (!delivery.consumed && (!delivery.queued || !queueForLane(delivery.lane).includes(delivery.message)))
+				continue;
 			events.push({
 				type: "command_not_delivered",
 				id: delivery.id,
@@ -466,6 +502,16 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		};
 		unsubscribe = session.subscribe((event) => {
 			if (event.type === "queue_update") updateQueueSnapshot(event);
+			if (
+				event.type === "turn_end" &&
+				!(
+					event.message.role === "assistant" &&
+					event.message.stopReason === "error" &&
+					event.message.errorMessage === "No new provider request after graceful stop"
+				)
+			) {
+				markConsumedDeliveriesDelivered();
+			}
 			output(toJsonEvent(event));
 			if (event.type === "agent_settled") {
 				void checkShutdownRequested();
@@ -965,7 +1011,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 	};
 
 	const onInputEnd = () => {
-		void shutdown();
+		if (gracefulExitRequested) return;
+		gracefulExitRequested = true;
+		session.agent.requestStopAfterTurn();
+		void waitForGracefulShutdown();
 	};
 	process.stdin.on("end", onInputEnd);
 

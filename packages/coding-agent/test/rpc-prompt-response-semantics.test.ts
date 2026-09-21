@@ -468,6 +468,94 @@ describe("RPC prompt response semantics", () => {
 		}
 	});
 
+	it("reports only the duplicate queued command that is consumed without a provider turn", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 100 });
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+		let sawTwoQueuedFollowUps = false;
+		let stopSent = false;
+		rpcIo.onWrite = (line) => {
+			const record = JSON.parse(line) as { type?: string; followUp?: string[] };
+			if (record.type !== "queue_update") return;
+			if (record.followUp?.length === 2) sawTwoQueuedFollowUps = true;
+			if (sawTwoQueuedFollowUps && !stopSent && record.followUp?.length === 0) {
+				stopSent = true;
+				process.emit("SIGUSR2");
+			}
+		};
+
+		try {
+			lineHandler(JSON.stringify({ id: "duplicate-start", type: "prompt", message: "Start" }));
+			await vi.waitFor(() => expect(getPromptResponses(rpcIo.outputLines, "duplicate-start")).toHaveLength(1));
+			lineHandler(
+				JSON.stringify({
+					id: "duplicate-one",
+					type: "follow_up",
+					message: "same text",
+				}),
+			);
+			lineHandler(
+				JSON.stringify({
+					id: "duplicate-two",
+					type: "follow_up",
+					message: "same text",
+				}),
+			);
+			await vi.waitFor(() => {
+				const records = parseOutputLines(rpcIo.outputLines);
+				for (const id of ["duplicate-one", "duplicate-two"]) {
+					expect(records).toContainEqual(expect.objectContaining({ id, type: "response", success: true }));
+				}
+			});
+			await vi.waitFor(() => expect(exitCodes).toEqual([0]));
+
+			const notDelivered = parseOutputLines(rpcIo.outputLines).filter(
+				(record) => record.type === "command_not_delivered",
+			);
+			expect(notDelivered).toEqual([
+				{
+					type: "command_not_delivered",
+					id: "duplicate-two",
+					command: "follow_up",
+					error: "RPC session stopped gracefully before command was delivered",
+				},
+			]);
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
+	it("treats stdin EOF as graceful stop for an accepted prompt", async () => {
+		const { lineHandler, cleanup, getStreamCalls } = await startRpcMode({ withAuth: true, responseDelayMs: 25 });
+		const exitCodes: number[] = [];
+		const exit = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			exitCodes.push(typeof code === "number" ? code : code ? Number(code) : 0);
+			return undefined as never;
+		});
+		let eofSent = false;
+		rpcIo.onWrite = (line) => {
+			if (!eofSent && line.includes('"id":"eof-accepted"') && line.includes('"success":true')) {
+				eofSent = true;
+				process.stdin.emit("end");
+			}
+		};
+
+		try {
+			lineHandler(JSON.stringify({ id: "eof-accepted", type: "prompt", message: "Finish before EOF" }));
+			await vi.waitFor(() => expect(exitCodes.length).toBeGreaterThan(0));
+			expect(exitCodes.every((code) => code === 0)).toBe(true);
+			expect(getStreamCalls()).toBe(1);
+			expect(parseOutputLines(rpcIo.outputLines)).toContainEqual(expect.objectContaining({ type: "agent_end" }));
+		} finally {
+			exit.mockRestore();
+			await cleanup();
+		}
+	});
+
 	it("rejects a new RPC command after graceful stop and names the stop", async () => {
 		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 0 });
 		const exitCodes: number[] = [];
