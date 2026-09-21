@@ -5,9 +5,8 @@
  *
  * Names are stable once published. Add a new name rather than change one.
  */
+// RPC mode does not handle SIGUSR2, so graceful-turn-exit is not advertised.
 export const CAPABILITIES: readonly string[] = [
-	// Print mode finishes the turn in flight on SIGUSR2 and exits 0.
-	"graceful-turn-exit",
 	// ~/.pi/agent/codex-service-tier needs the full consent sentence for "priority".
 	"codex-service-tier-consent",
 	// `--mode json` streams one JSON event per line.

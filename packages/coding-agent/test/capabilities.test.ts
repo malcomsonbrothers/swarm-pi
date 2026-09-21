@@ -13,14 +13,15 @@ describe("--capabilities", () => {
 		expect(parseArgs(["-p", "hello"]).capabilities).toBeUndefined();
 	});
 
-	test("prints one capability per line, including graceful-turn-exit", () => {
+	test("prints only capabilities supported by the daemon", () => {
 		const output = formatCapabilities();
 		const lines = output.split("\n");
 
 		expect(output.endsWith("\n")).toBe(true);
 		expect(lines[lines.length - 1]).toBe("");
 		expect(lines.slice(0, -1)).toEqual([...CAPABILITIES]);
-		expect(lines).toContain("graceful-turn-exit");
+		expect([...CAPABILITIES]).toEqual(["codex-service-tier-consent", "print-mode-json-events"]);
+		expect(lines).not.toContain("graceful-turn-exit");
 		for (const line of lines.slice(0, -1)) {
 			expect(line).toMatch(/^[a-z0-9-]+$/);
 		}
