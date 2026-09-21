@@ -495,6 +495,7 @@ describe("RPC prompt response semantics", () => {
 					id: "duplicate-one",
 					type: "follow_up",
 					message: "same text",
+					images: [{ type: "image", data: "first", mimeType: "image/png" }],
 				}),
 			);
 			lineHandler(
@@ -502,6 +503,7 @@ describe("RPC prompt response semantics", () => {
 					id: "duplicate-two",
 					type: "follow_up",
 					message: "same text",
+					images: [{ type: "image", data: "second", mimeType: "image/png" }],
 				}),
 			);
 			await vi.waitFor(() => {
