@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -48,14 +48,15 @@ export class ModelRuntime { static create() {} }
 ` : 'export const marker = "local tarball";',
 			...(isAgent ? {
 				"dist/cli.js": 'console.log("1.0.0");',
-				"dist/current/cli.js": 'console.log("1.0.0");',
-				"dist/current/rpc-entry.js": 'console.log("rpc");',
+				"dist/bundle/cli.js": 'console.log("1.0.0");',
+				"dist/bundle/rpc-entry.js": 'console.log("rpc");',
 			} : {}),
 		};
 		for (const [path, content] of Object.entries(files)) {
 			mkdirSync(dirname(join(pkg.directory, path)), { recursive: true });
 			writeFileSync(join(pkg.directory, path), content);
 		}
+		if (isAgent) symlinkSync("bundle", join(pkg.directory, "dist/current"), "dir");
 	}
 	const tarballs = packReleasePackages(packages, join(root, "tarballs"));
 	const directory = join(root, "consumer");

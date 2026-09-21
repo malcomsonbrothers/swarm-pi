@@ -88,7 +88,7 @@ function createStreamFn(state: { calls: number }): StreamFn {
 function createAgent(
 	streamFn: StreamFn,
 	tools: AgentTool<any>[],
-	options: Pick<AgentOptions, "getApiKey" | "shouldStopAfterTurn" | "prepareNextTurnWithContext"> = {},
+	options: Pick<AgentOptions, "getApiKey" | "finishTurn" | "prepareNextTurnWithContext"> = {},
 ): Agent {
 	return new Agent({
 		streamFn,
@@ -184,9 +184,9 @@ describe("requestStopAfterTurn", () => {
 		let firstAgent: Agent | undefined;
 		let firstPreparationCalls = 0;
 		firstAgent = createAgent(createStreamFn(firstState), [], {
-			shouldStopAfterTurn: () => {
+			finishTurn: () => {
 				firstAgent?.requestStopAfterTurn();
-				return false;
+				return undefined;
 			},
 			prepareNextTurnWithContext: async () => {
 				firstPreparationCalls++;
@@ -223,9 +223,9 @@ describe("requestStopAfterTurn", () => {
 				credentialCalls++;
 				return "test-key";
 			},
-			shouldStopAfterTurn: () => {
+			finishTurn: () => {
 				agent?.requestStopAfterTurn();
-				return false;
+				return undefined;
 			},
 		});
 
